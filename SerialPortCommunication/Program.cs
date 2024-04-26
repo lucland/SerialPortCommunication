@@ -384,31 +384,36 @@ namespace SerialPortCommunication
         }
 
 
-        private async Task ProcessDataAsync(string data, string pCode)
+        private async Task<bool> ProcessDataAsync(string data, string pCode)
         {
-            // Console.WriteLine($"{pCode}, processDataAsync");
+            bool allSuccess = true; // Assume success unless an error occurs
             string[] lines = data.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+
             foreach (var line in lines)
             {
                 if (!string.IsNullOrWhiteSpace(line))
                 {
-                    // Console.WriteLine($"{line}");
                     Event evt = ParseEventFromLine(line, pCode);
                     if (evt != null)
                     {
-                        bool success = await SendEventToBackendAsync(evt);  // Ensure async operations are awaited
+                        bool success = await SendEventToBackendAsync(evt); // Ensure async operations are awaited
                         if (!success)
                         {
                             _updateStatusAction($"Failed to send event data to backend for {line}.");
+                            allSuccess = false; // Set to false if any send fails
                         }
-                        else
-                        {
-                            _updateStatusAction("Event data successfully sent to backend.");
-                        }
+                    }
+                    else
+                    {
+                        _updateStatusAction("Failed to parse line into an event.");
+                        allSuccess = false; // Parsing failure also sets success to false
                     }
                 }
             }
+
+            return allSuccess; // Return the overall success status
         }
+
 
         private async Task<bool> RequestAndProcessData(string slaveId)
         {
@@ -430,19 +435,6 @@ namespace SerialPortCommunication
                 if (line.Contains("}")) // Check if the line contains the closing bracket for data block
                 {
                     endOfDataBlockDetected = true;
-                    // Process any remaining data before sending the clear commands
-                    if (dataBuilder.Length > 0)
-                    {
-                        _updateStatusAction($"Data received from {slaveId}. Processing...");
-                        await ProcessDataAsync(dataBuilder.ToString(), slaveId);
-                    }
-                    // Send clear data commands after confirming end of data block
-                    _serialPort.WriteLine($"{slaveId} CLDATA"); // Command to clear data on the slave
-                    Console.WriteLine($"{slaveId} CLDATA");
-                    _serialPort.WriteLine($"{slaveId} CLDATA2"); // Additional command if needed
-                    Console.WriteLine($"{slaveId} CLDATA2");
-                    _updateStatusAction($"Data processing completed and cleared for {slaveId}.");
-                    return true;
                 }
                 else if (!string.IsNullOrWhiteSpace(line))
                 {
@@ -450,7 +442,26 @@ namespace SerialPortCommunication
                 }
             }
 
-            return false; // This line will normally not be reached
+            if (dataBuilder.Length > 0)
+            {
+                _updateStatusAction($"Data received from {slaveId}. Processing...");
+                bool processSuccess = await ProcessDataAsync(dataBuilder.ToString(), slaveId);
+                if (processSuccess)
+                {
+                    // Send clear data commands only after confirming successful processing
+                    _serialPort.WriteLine($"{slaveId} CLDATA"); // Command to clear data on the slave
+                    Console.WriteLine($"{slaveId} CLDATA");
+                    _serialPort.WriteLine($"{slaveId} CLDATA2"); // Additional command if needed
+                    Console.WriteLine($"{slaveId} CLDATA2");
+                    _updateStatusAction($"Data processing completed and cleared for {slaveId}.");
+                }
+                else
+                {
+                    _updateStatusAction($"Failed to process data for {slaveId}.");
+                }
+                return processSuccess;
+            }
+            return false;
         }
 
 
