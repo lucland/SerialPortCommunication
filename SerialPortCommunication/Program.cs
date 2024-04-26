@@ -446,7 +446,7 @@ namespace SerialPortCommunication
 
             while (!endOfDataBlockDetected)
             {
-                var line = await ReadLineAsync(TimeSpan.FromSeconds(10));
+                var line = await ReadLineAsync(TimeSpan.FromSeconds(3));
                 if (line == null) // Timeout occurred, no data received
                 {
                     _updateStatusAction($"Timeout occurred or no more data received from {slaveId}.");
