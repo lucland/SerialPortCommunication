@@ -75,6 +75,57 @@ namespace SerialPortCommunication
             _serialPort.ErrorReceived += OnErrorReceived;
         }
 
+        public async Task StartProcessingAsync()
+        {
+            if (_cancellationTokenSource == null || _cancellationTokenSource.IsCancellationRequested)
+            {
+                _cancellationTokenSource = new CancellationTokenSource();
+            }
+
+            // Check if the port is already open to prevent trying to open it multiple times
+            if (!_serialPort.IsOpen)
+            {
+                try
+                {
+                    _serialPort.Open();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Failed to open serial port: {ex.Message}");
+                    return; // Exit if cannot open the port
+                }
+            }
+
+            try
+            {
+                // Process indefinitely until cancellation is requested
+                while (!_cancellationTokenSource.IsCancellationRequested)
+                {
+                    await ProcessCycleAsync(_cancellationTokenSource.Token);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error in processing: {ex.Message}, restarting...");
+                _cancellationTokenSource.Cancel(); // Ensure old tasks are canceled before restarting
+                StartProcessingAsync(); // Recursively restart processing on error
+            }
+        }
+
+        private void RestartProcessing()
+        {
+            if (_serialPort.IsOpen)
+            {
+                _serialPort.Close();
+            }
+
+            _cancellationTokenSource?.Cancel();
+            _cancellationTokenSource = new CancellationTokenSource(); // Reinitialize the cancellation token source
+
+            StartProcessingAsync(); // Restart processing
+        }
+
+
         private void CheckForStall(object sender, System.Timers.ElapsedEventArgs e)
         {
             if ((DateTime.Now - _lastSuccessfulOperation).TotalMinutes > 5)
@@ -98,36 +149,6 @@ namespace SerialPortCommunication
             _watchdogTimer.AutoReset = true;
             _watchdogTimer.Start();
         }
-
-        private void RestartProcessing()
-        {
-            if (_serialPort.IsOpen)
-            {
-                _serialPort.Close();
-            }
-
-            // Ensure _cancellationTokenSource is initialized and not already cancelled
-            if (_cancellationTokenSource == null || _cancellationTokenSource.IsCancellationRequested)
-            {
-                _cancellationTokenSource = new CancellationTokenSource();
-            }
-            else
-            {
-                _cancellationTokenSource.Cancel();
-            }
-
-            try
-            {
-                StartProcessingAsync(); // Restart processing
-            }
-            catch (Exception ex)
-            {
-                _updateStatusAction($"Failed to restart processing: {ex.Message}");
-                // Optionally, attempt to restart again or notify someone
-            }
-        }
-
-
 
         private void OnDataReceived(object sender, SerialDataReceivedEventArgs e)
         {
@@ -215,25 +236,6 @@ namespace SerialPortCommunication
         {
             _updateStatusAction("Serial port error received.");
         }
-
-        public async Task StartProcessingAsync()
-        {
-            _cancellationTokenSource = new CancellationTokenSource();
-            try
-            {
-                _serialPort.Open();
-                while (!_cancellationTokenSource.IsCancellationRequested)
-                {
-                    await ProcessCycleAsync(_cancellationTokenSource.Token);
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error in processing: {ex.Message}, restarting...");
-                StartProcessingAsync(); // Recursively restart processing on error
-            }
-        }
-
 
 
         private async Task ProcessCycleAsync(CancellationToken cancellationToken)
