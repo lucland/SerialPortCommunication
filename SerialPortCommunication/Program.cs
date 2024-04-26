@@ -114,7 +114,11 @@ namespace SerialPortCommunication
         {
             try
             {
-                string incomingData = _serialPort.ReadExisting();
+                // Use ReadByte or Read to ensure no out-of-bound errors
+                int dataLength = _serialPort.BytesToRead;
+                byte[] buffer = new byte[dataLength];
+                int bytesRead = _serialPort.Read(buffer, 0, buffer.Length); // Safely read the data
+                string incomingData = Encoding.ASCII.GetString(buffer, 0, bytesRead);
                 if (!string.IsNullOrEmpty(incomingData))
                 {
                     _dataBuffer.Append(incomingData);
@@ -124,37 +128,36 @@ namespace SerialPortCommunication
             catch (Exception ex)
             {
                 _updateStatusAction($"Error while receiving data: {ex.Message}");
-                // Consider resetting the buffer or other recovery mechanisms here
+                ResetBuffer(); // Resetting the buffer on error
             }
         }
 
-
+        private void ResetBuffer()
+        {
+            _dataBuffer.Clear(); // Clears the data buffer to prevent processing of corrupted data
+            _updateStatusAction("Buffer has been reset due to error.");
+            // Optionally, you might want to log this incident or notify an administrator
+        }
         private void ProcessBufferedData()
         {
             string bufferContent = _dataBuffer.ToString();
             int indexOfLastNewLine = bufferContent.LastIndexOf('\n');
 
-            if (indexOfLastNewLine == -1)
+            if (indexOfLastNewLine != -1)
             {
-                return; // No complete line(s) to process yet.
-            }
+                string completeData = bufferContent.Substring(0, indexOfLastNewLine + 1);
+                _dataBuffer.Remove(0, indexOfLastNewLine + 1);
 
-            // Get complete lines that end with a newline character, safely handle the substring operation.
-            string completeData = bufferContent.Substring(0, indexOfLastNewLine + 1);
-            _dataBuffer.Remove(0, indexOfLastNewLine + 1);  // Safely remove processed data from buffer.
-
-            string[] lines = completeData.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            foreach (var line in lines)
-            {
-                ProcessLine(line.Trim());
+                string[] lines = completeData.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (var line in lines)
+                {
+                    ProcessLine(line.Trim());
+                }
             }
         }
 
-
-
         private void ProcessLine(string line)
         {
-            // Ignore control lines
             if (line.StartsWith("{") || line.StartsWith("}"))
             {
                 Console.WriteLine($"Ignored control line: {line}");
@@ -163,8 +166,8 @@ namespace SerialPortCommunication
 
             if (line.Contains("Yes"))
             {
-                _responseReceived.Set();  // Signal that a response was received
-                _lastSuccessfulOperation = DateTime.Now; // Update operation timestamp on successful communication
+                _responseReceived.Set();
+                _lastSuccessfulOperation = DateTime.Now;
                 Console.WriteLine("Received confirmation response.");
             }
             else
@@ -175,7 +178,7 @@ namespace SerialPortCommunication
                     if (evt != null)
                     {
                         Console.WriteLine($"Parsed event: {JsonConvert.SerializeObject(evt)}");
-                        Task.Run(() => SendEventToBackendAsync(evt)); // Asynchronously send the event to the backend
+                        Task.Run(() => SendEventToBackendAsync(evt));
                     }
                     else
                     {
@@ -188,9 +191,6 @@ namespace SerialPortCommunication
                 }
             }
         }
-
-
-
 
         private void OnErrorReceived(object sender, SerialErrorReceivedEventArgs e)
         {
@@ -319,7 +319,7 @@ namespace SerialPortCommunication
         private async Task<string> ReadLineAsync(TimeSpan timeout)
         {
             var taskCompletionSource = new TaskCompletionSource<string>();
-            var timer = new System.Timers.Timer(timeout.TotalMilliseconds) { AutoReset = false };
+            var timer = new System.Timers.Timer(timeout.TotalMilliseconds); // Increase timeout if necessary
             timer.Elapsed += (sender, e) =>
             {
                 timer.Stop();
@@ -435,6 +435,12 @@ namespace SerialPortCommunication
                 if (line.Contains("}")) // Check if the line contains the closing bracket for data block
                 {
                     endOfDataBlockDetected = true;
+                    // Send clear data commands only after confirming successful processing
+                    _serialPort.WriteLine($"{slaveId} CLDATA"); // Command to clear data on the slave
+                    Console.WriteLine($"{slaveId} CLDATA");
+                    _serialPort.WriteLine($"{slaveId} CLDATA2"); // Additional command if needed
+                    Console.WriteLine($"{slaveId} CLDATA2");
+
                 }
                 else if (!string.IsNullOrWhiteSpace(line))
                 {
