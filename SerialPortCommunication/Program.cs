@@ -105,9 +105,28 @@ namespace SerialPortCommunication
             {
                 _serialPort.Close();
             }
-            _cancellationTokenSource?.Cancel();
-            StartProcessingAsync(); // Restart processing
+
+            // Ensure _cancellationTokenSource is initialized and not already cancelled
+            if (_cancellationTokenSource == null || _cancellationTokenSource.IsCancellationRequested)
+            {
+                _cancellationTokenSource = new CancellationTokenSource();
+            }
+            else
+            {
+                _cancellationTokenSource.Cancel();
+            }
+
+            try
+            {
+                StartProcessingAsync(); // Restart processing
+            }
+            catch (Exception ex)
+            {
+                _updateStatusAction($"Failed to restart processing: {ex.Message}");
+                // Optionally, attempt to restart again or notify someone
+            }
         }
+
 
 
         private void OnDataReceived(object sender, SerialDataReceivedEventArgs e)
