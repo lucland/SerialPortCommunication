@@ -438,7 +438,9 @@ namespace SerialPortCommunication
                     }
                     // Send clear data commands after confirming end of data block
                     _serialPort.WriteLine($"{slaveId} CLDATA"); // Command to clear data on the slave
+                    Console.WriteLine($"{slaveId} CLDATA");
                     _serialPort.WriteLine($"{slaveId} CLDATA2"); // Additional command if needed
+                    Console.WriteLine($"{slaveId} CLDATA2");
                     _updateStatusAction($"Data processing completed and cleared for {slaveId}.");
                     return true;
                 }
