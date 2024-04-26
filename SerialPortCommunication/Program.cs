@@ -429,17 +429,21 @@ namespace SerialPortCommunication
                 if (line == null) // Timeout occurred, no data received
                 {
                     _updateStatusAction($"Timeout occurred or no more data received from {slaveId}.");
+                    _serialPort.WriteLine($"{slaveId} CLDATA"); // Command to clear data on the slave
+                    Console.WriteLine($"{slaveId} CLDATA");
+                    _serialPort.WriteLine($"{slaveId} CLDATA2"); // Additional command if needed
+                    Console.WriteLine($"{slaveId} CLDATA2");
                     return false; // Signifies that there was a failure in receiving data
                 }
 
                 if (line.Contains("}")) // Check if the line contains the closing bracket for data block
                 {
-                    endOfDataBlockDetected = true;
                     // Send clear data commands only after confirming successful processing
                     _serialPort.WriteLine($"{slaveId} CLDATA"); // Command to clear data on the slave
                     Console.WriteLine($"{slaveId} CLDATA");
                     _serialPort.WriteLine($"{slaveId} CLDATA2"); // Additional command if needed
                     Console.WriteLine($"{slaveId} CLDATA2");
+                    endOfDataBlockDetected = true;
 
                 }
                 else if (!string.IsNullOrWhiteSpace(line))
@@ -504,7 +508,7 @@ namespace SerialPortCommunication
                 Status = "sent"
             };
 
-           //     Console.WriteLine($"Parsed event: {JsonConvert.SerializeObject(evt)}");
+            //     Console.WriteLine($"Parsed event: {JsonConvert.SerializeObject(evt)}");
             return evt;
         }
 
