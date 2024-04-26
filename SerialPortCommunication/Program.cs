@@ -424,12 +424,23 @@ namespace SerialPortCommunication
                 if (line == null) // Timeout occurred, no data received
                 {
                     _updateStatusAction($"Timeout occurred or no more data received from {slaveId}.");
-                    return false; // Significa que houve uma falha ao receber os dados
+                    return false; // Signifies that there was a failure in receiving data
                 }
 
                 if (line.Contains("}")) // Check if the line contains the closing bracket for data block
                 {
                     endOfDataBlockDetected = true;
+                    // Process any remaining data before sending the clear commands
+                    if (dataBuilder.Length > 0)
+                    {
+                        _updateStatusAction($"Data received from {slaveId}. Processing...");
+                        await ProcessDataAsync(dataBuilder.ToString(), slaveId);
+                    }
+                    // Send clear data commands after confirming end of data block
+                    _serialPort.WriteLine($"{slaveId} CLDATA"); // Command to clear data on the slave
+                    _serialPort.WriteLine($"{slaveId} CLDATA2"); // Additional command if needed
+                    _updateStatusAction($"Data processing completed and cleared for {slaveId}.");
+                    return true;
                 }
                 else if (!string.IsNullOrWhiteSpace(line))
                 {
@@ -437,17 +448,8 @@ namespace SerialPortCommunication
                 }
             }
 
-            if (dataBuilder.Length > 0)
-            {
-                _updateStatusAction($"Data received from {slaveId}. Processing...");
-                await ProcessDataAsync(dataBuilder.ToString(), slaveId);
-            }
-            _serialPort.WriteLine($"{slaveId} CLDATA"); // Send command to clear data on slave
-            _serialPort.WriteLine($"{slaveId} CLDATA2");
-            _updateStatusAction($"Data processing completed and cleared for {slaveId}.");
-            return true;
+            return false; // This line will normally not be reached
         }
-
 
 
         private Event ParseEventFromLine(string line, string pCode)
@@ -483,7 +485,7 @@ namespace SerialPortCommunication
                 Status = "sent"
             };
 
-            //     Console.WriteLine($"Parsed event: {JsonConvert.SerializeObject(evt)}");
+           //     Console.WriteLine($"Parsed event: {JsonConvert.SerializeObject(evt)}");
             return evt;
         }
 
