@@ -457,7 +457,7 @@ namespace SerialPortCommunication
                     return false; // Signifies that there was a failure in receiving data
                 }
 
-                if (line.Contains("}")) // Check if the line contains the closing bracket for data block
+                if (line.Contains('}')) // Check if the line contains the closing bracket for data block
                 {
                     // Send clear data commands only after confirming successful processing
                     _serialPort.WriteLine($"{slaveId} CLDATA"); // Command to clear data on the slave
@@ -465,7 +465,6 @@ namespace SerialPortCommunication
                     _serialPort.WriteLine($"{slaveId} CLDATA2"); // Additional command if needed
                     Console.WriteLine($"{slaveId} CLDATA2");
                     endOfDataBlockDetected = true;
-
                 }
                 else if (!string.IsNullOrWhiteSpace(line))
                 {
@@ -489,6 +488,10 @@ namespace SerialPortCommunication
                 else
                 {
                     _updateStatusAction($"Failed to process data for {slaveId}.");
+                    _serialPort.WriteLine($"{slaveId} CLDATA"); // Command to clear data on the slave
+                    Console.WriteLine($"{slaveId} CLDATA");
+                    _serialPort.WriteLine($"{slaveId} CLDATA2"); // Additional command if needed
+                    Console.WriteLine($"{slaveId} CLDATA2");
                 }
                 return processSuccess;
             }
@@ -526,9 +529,8 @@ namespace SerialPortCommunication
                 ProjectId = "4f24ac1f-6fd3-4a11-9613-c6a564f2bd86",
                 Action = GetActionFromCode(actionCode),
                 BeaconId = beaconId,
-                Status = "sent"
+                Status = rssi,
             };
-
             //     Console.WriteLine($"Parsed event: {JsonConvert.SerializeObject(evt)}");
             return evt;
         }
