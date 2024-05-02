@@ -58,7 +58,7 @@ namespace SerialPortCommunication
         public SerialDataProcessor(EventRepository eventRepository, Action<string> updateStatusAction)
         {
             InitializeSerialPort();
-            _slavePcs = new List<string> { "P1", "P2", "P3", "P4", "P5", "P6", "P8", "P9" };
+            _slavePcs = new List<string> { "P1", "P3", "P4", "P5", "P6", "P2", "P8", "P9" };
             _lastApprovedIdsSentDate = DateTime.MinValue;
             _eventRepository = eventRepository;
             _updateStatusAction = updateStatusAction;
@@ -280,6 +280,21 @@ namespace SerialPortCommunication
                     {
                         _lastSuccessfulOperation = DateTime.Now;
                     }
+
+                    // Fetch areas from the repository
+                    List<string> areas = await _eventRepository.GetAllAreas();
+                    foreach (var area in areas)
+                    {
+                        // Write each area string to the Serial Port
+                        _serialPort.WriteLine(area);
+                        _updateStatusAction($"Sent to Serial: {area}");
+                    }
+
+                    // Optionally, add a delay or perform other tasks
+                    await Task.Delay(1000); // Delay for a period to simulate processing time or manage pacing
+
+                    _lastSuccessfulOperation = DateTime.Now;
+
                 }
             }
             catch (Exception ex)

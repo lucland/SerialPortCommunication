@@ -2,6 +2,7 @@
 using Newtonsoft.Json;
 using SerialPortCommunication.Models;
 using SerialPortCommunication.Services;
+using static System.Net.WebRequestMethods;
 
 namespace SerialPortCommunication.Repositories
 {
@@ -24,6 +25,12 @@ namespace SerialPortCommunication.Repositories
         public async Task<string> GetAllEventsAsync(int limit, int offset)
         {
             return await GetAsync($"{BaseUrl}?limit={limit}&offset={offset}");
+        }
+
+        public async Task<List<string>> GetAllAreas()
+        {
+            var json =  await GetAsync($"https://gmarineinnovation.com/api/v1/employees/areas");
+            return JsonConvert.DeserializeObject<List<string>>(json);
         }
 
         public async Task<Event> CreateEventAsync(Event eventItem)
