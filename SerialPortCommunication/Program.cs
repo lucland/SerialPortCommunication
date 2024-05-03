@@ -58,7 +58,7 @@ namespace SerialPortCommunication
         public SerialDataProcessor(EventRepository eventRepository, Action<string> updateStatusAction)
         {
             InitializeSerialPort();
-            _slavePcs = new List<string> { "P1", "P3", "P4", "P5", "P6", "P2", "P8", "P9" };
+            _slavePcs = new List<string> { "P1B", "P3", "P7", "P4", "P5", "P6", "P2", "P8", "P9" };
             _lastApprovedIdsSentDate = DateTime.MinValue;
             _eventRepository = eventRepository;
             _updateStatusAction = updateStatusAction;
@@ -282,16 +282,19 @@ namespace SerialPortCommunication
                     }
 
                     // Fetch areas from the repository
-                    List<string> areas = await _eventRepository.GetAllAreas();
-                    foreach (var area in areas)
+                 /*   List<string> areas = await _eventRepository.GetAllAreas();
+                    if (areas != null && areas.Count > 0)
                     {
-                        // Write each area string to the Serial Port
-                        _serialPort.WriteLine(area);
-                        _updateStatusAction($"Sent to Serial: {area}");
-                    }
+                        foreach (var area in areas)
+                        {
+                            // Write each area string to the Serial Port
+                            _serialPort.WriteLine(area);
+                            _updateStatusAction($"Sent to Serial: {area}");
+                        }
+                    }*/
 
-                    // Optionally, add a delay or perform other tasks
-                    await Task.Delay(1000); // Delay for a period to simulate processing time or manage pacing
+                        // Optionally, add a delay or perform other tasks
+                        await Task.Delay(1000); // Delay for a period to simulate processing time or manage pacing
 
                     _lastSuccessfulOperation = DateTime.Now;
 
@@ -535,6 +538,7 @@ namespace SerialPortCommunication
             string rssi = dataParts.Length > 1 ? dataParts[1].Trim() : "0";
             string actionCode = dataParts.Length > 2 ? dataParts[2].Trim() : "L1";
 
+
             Event evt = new Event
             {
                 Id = Guid.NewGuid().ToString(),
@@ -543,7 +547,7 @@ namespace SerialPortCommunication
                 Timestamp = timestamp,
                 ProjectId = "4f24ac1f-6fd3-4a11-9613-c6a564f2bd86",
                 Action = GetActionFromCode(actionCode),
-                BeaconId = beaconId,
+                BeaconId = beaconId.Trim(),
                 Status = rssi,
             };
             //     Console.WriteLine($"Parsed event: {JsonConvert.SerializeObject(evt)}");
