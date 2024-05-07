@@ -1,16 +1,15 @@
 ﻿using System;
-using System.IO.Ports;
-using System.Threading;
-using System.Threading.Tasks;
 using System.Collections.Generic;
+using System.IO.Ports;
 using System.Text;
+using System.Threading.Tasks;
 using Newtonsoft.Json;
+using RabbitMQ.Client;
 using System.Net.Http;
-using SerialPortCommunication.Repositories;
+using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
 using SerialPortCommunication.Models;
-using static System.Net.Mime.MediaTypeNames;
-using SerialPortCommunication.Services;
-using System.Diagnostics;
 
 namespace SerialPortCommunication
 {
@@ -18,665 +17,200 @@ namespace SerialPortCommunication
     {
         static async Task Main(string[] args)
         {
-            Console.WriteLine("Starting Serial Port Communication...");
-
-            // Initialize the repository and update status action
-            EventRepository eventRepository = new EventRepository(apiService: new ApiService());  // Assuming constructor and necessary methods are defined
-            Action<string> updateStatus = (message) => Console.WriteLine(message);
-
-            // Create the processor instance
-            SerialDataProcessor processor = new SerialDataProcessor(eventRepository, updateStatus);
-
-            // Setup the watchdog timer
-            processor.SetupWatchdogTimer();
-
-            // Start the processing
-            await processor.StartProcessingAsync();
-
+            Console.WriteLine("Initializing Serial Port Communication...");
+            var serialManager = new SerialManager();
+            await serialManager.InitializeAsync();
             Console.ReadLine(); // Keep the console open
         }
-
     }
 
-
-    public class SerialDataProcessor
+    public class SerialManager
     {
-        private SerialPort _serialPort;
-        private CancellationTokenSource _cancellationTokenSource;
-        private EventRepository _eventRepository;
-        private List<string> _slavePcs;
-        private Action<string> _updateStatusAction;
-        private DateTime _lastApprovedIdsSentDate;
-        private bool _isProcessingActive = false;
-        private string _currentPCode = string.Empty;
-        private ManualResetEvent _responseReceived = new ManualResetEvent(false);
-        private StringBuilder _dataBuffer = new StringBuilder();
-        private DateTime _lastSuccessfulOperation;
-        private System.Timers.Timer _watchdogTimer;
+        private readonly SerialPort _serialPort;
+        private readonly RabbitMQService _rabbitMQService;
+        private readonly List<string> _sensorSequence;
+        private readonly HttpClient _httpClient;
+        private readonly string _apiBaseUrl = "https://your-api-url.com";
 
-        // Constructor initializes the serial port and other components
-        public SerialDataProcessor(EventRepository eventRepository, Action<string> updateStatusAction)
+        public SerialManager()
         {
-            InitializeSerialPort();
-            _slavePcs = new List<string> { "P1B", "P3", "P7", "P4", "P5", "P6", "P2", "P8", "P9" };
-            _lastApprovedIdsSentDate = DateTime.MinValue;
-            _eventRepository = eventRepository;
-            _updateStatusAction = updateStatusAction;
-            _watchdogTimer = new System.Timers.Timer(30000); // Check every 30 seconds
-            _watchdogTimer.Elapsed += CheckForStall;
-            _watchdogTimer.AutoReset = true;
-            _watchdogTimer.Start();
-        }
-
-        private void InitializeSerialPort()
-        {
-            _serialPort = new SerialPort("COM5", 115200);
+            _serialPort = new SerialPort("COM5", 115200, Parity.None, 8, StopBits.One)
+            {
+                Handshake = Handshake.None,
+                ReadTimeout = 1000,
+                WriteTimeout = 1000
+            };
             _serialPort.DataReceived += OnDataReceived;
             _serialPort.ErrorReceived += OnErrorReceived;
+            _rabbitMQService = new RabbitMQService();
+            _httpClient = new HttpClient();
+            _sensorSequence = new List<string> { "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10", "P11", "P12", "P1B" }; // Initial order can be changed as needed
         }
 
-        public async Task StartProcessingAsync()
+        public async Task InitializeAsync()
         {
-            if (_cancellationTokenSource == null || _cancellationTokenSource.IsCancellationRequested)
-            {
-                _cancellationTokenSource = new CancellationTokenSource();
-            }
-
-            // Check if the port is already open to prevent trying to open it multiple times
             if (!_serialPort.IsOpen)
             {
-                try
-                {
-                    _serialPort.Open();
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Failed to open serial port: {ex.Message}");
-                    return; // Exit if cannot open the port
-                }
+                _serialPort.Open();
             }
 
+            await StartCycleAsync();
+        }
+
+        private async Task StartCycleAsync()
+        {
+            foreach (var sensorCode in _sensorSequence)
+            {
+                await HandleSensorCycle(sensorCode);
+            }
+        }
+
+        private async Task HandleSensorCycle(string sensorCode)
+        {
             try
             {
-                // Process indefinitely until cancellation is requested
-                while (!_cancellationTokenSource.IsCancellationRequested)
+                await SendCommandAndWaitForData($"{sensorCode} OK", $"{sensorCode} Yes");
+                string data = await SendCommandAndWaitForData($"{sensorCode} SDATAFULL", "}");
+                string value = "}";
+                if (!string.IsNullOrWhiteSpace(data) && !data.Contains(value) && !data.Contains("{" + sensorCode))
                 {
-                    await ProcessCycleAsync(_cancellationTokenSource.Token);
+                    ProcessData(data, sensorCode);
                 }
+                await SendCommandAndWaitForData($"{sensorCode} CLDATA", $"{sensorCode} CLDATA OK");
+                await SendCommandAndWaitForData($"{sensorCode} CLDATA2", $"{sensorCode} CLDATA2 OK");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error in processing: {ex.Message}, restarting...");
-                _cancellationTokenSource.Cancel(); // Ensure old tasks are canceled before restarting
-                StartProcessingAsync(); // Recursively restart processing on error
+                LogError(sensorCode, ex.Message);
             }
         }
 
-        private void RestartProcessing()
+        private async Task<string> SendCommandAndWaitForData(string command, string endMarker)
         {
-            if (_serialPort.IsOpen)
-            {
-                _serialPort.Close();
-            }
-
-            _cancellationTokenSource?.Cancel();
-            _cancellationTokenSource = new CancellationTokenSource(); // Reinitialize the cancellation token source
-
-            StartProcessingAsync(); // Restart processing
+            _serialPort.WriteLine(command);
+            return await ReadResponseUntilMarker(endMarker);
         }
 
-
-        private void CheckForStall(object sender, System.Timers.ElapsedEventArgs e)
+        private async Task<string> ReadResponseUntilMarker(string marker)
         {
-            if ((DateTime.Now - _lastSuccessfulOperation).TotalMinutes > 5)
+            StringBuilder response = new StringBuilder();
+            var taskCompletionSource = new TaskCompletionSource<string>();
+            void handler(object sender, SerialDataReceivedEventArgs args)
             {
-                Console.WriteLine("System appears to be stalled. Attempting to restart processing...");
-                RestartProcessing();
-            }
-        }
-
-        public void SetupWatchdogTimer()
-        {
-            _watchdogTimer = new System.Timers.Timer(10000); // Trigger every 10 seconds
-            _watchdogTimer.Elapsed += (sender, args) =>
-            {
-                if ((DateTime.Now - _lastSuccessfulOperation).TotalSeconds > 10)
+                var data = _serialPort.ReadExisting();
+                response.Append(data);
+                if (data.Contains(marker))
                 {
-                    Console.WriteLine("Inactivity detected, restarting processing...");
-                    RestartProcessing();
+                    _serialPort.DataReceived -= handler;
+                    taskCompletionSource.SetResult(response.ToString());
                 }
-            };
-            _watchdogTimer.AutoReset = true;
-            _watchdogTimer.Start();
+            }
+            _serialPort.DataReceived += handler;
+            return await taskCompletionSource.Task;
+        }
+
+        private void ProcessData(string data, string sensorCode)
+        {
+            var events = ParseEvents(data, sensorCode);
+            foreach (var evt in events)
+            {
+                _rabbitMQService.SendMessage(evt);
+            }
+        }
+
+        private List<Event> ParseEvents(string data, string sensorCode)
+        {
+            var lines = data.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            return lines.Skip(1).Select(line => ParseEvent(line, sensorCode)).ToList();
+        }
+
+        private Event ParseEvent(string data, string sensorCode)
+        {
+            // Regex ajustada para extrair os componentes corretos e ignorar qualquer coisa após F1 ou L1
+            var regex = new Regex(@"(?<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (?<beaconId>[^,]+?),\s*(?<status>\d{1,3}),\s*(?<actionCode>[FL]1)");
+            var match = regex.Match(data.Trim());
+
+            if (match.Success)
+            {
+                string timestamp = match.Groups["timestamp"].Value;
+                string beaconId = match.Groups["beaconId"].Value.Trim();
+                string status = match.Groups["status"].Value.Trim();
+                string actionCode = match.Groups["actionCode"].Value.Trim();
+
+                return new Event
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    SensorId = sensorCode,
+                    EmployeeId = "-",  // as specified
+                    Timestamp = DateTime.Parse(timestamp),
+                    ProjectId = "projectid",
+                    Action = actionCode == "F1" ? 3 : (actionCode == "L1" ? 7 : 0),  // Assuming no other values appear
+                    BeaconId = beaconId,
+                    Status = status
+                };
+            }
+            else
+            {
+                // Here you should log or handle the failure to parse effectively
+                Console.WriteLine($"Failed to parse event from data: '{data}'.");
+                return null; // Or throw an exception depending on your error handling strategy
+            }
+        }
+
+        private void LogError(string sensorCode, string message)
+        {
+            string logMessage = $"{DateTime.Now}: Error at {sensorCode} - {message}\n";
+            File.AppendAllText($"Errors_{DateTime.Now:yyyyMMdd}.txt", logMessage);
         }
 
         private void OnDataReceived(object sender, SerialDataReceivedEventArgs e)
         {
-            try
-            {
-                int dataLength = _serialPort.BytesToRead;
-                byte[] buffer = new byte[dataLength];
-                int bytesRead = _serialPort.Read(buffer, 0, buffer.Length);
-                string incomingData = Encoding.ASCII.GetString(buffer, 0, bytesRead);
-
-                // Write raw data to file
-                WriteToFile(incomingData);
-
-                if (!string.IsNullOrEmpty(incomingData))
-                {
-                    _dataBuffer.Append(incomingData);
-                    ProcessBufferedData();
-                }
-            }
-            catch (Exception ex)
-            {
-                _updateStatusAction($"Error while receiving data: {ex.Message}");
-                ResetBuffer();
-            }
-        }
-
-
-        private void WriteToFile(string data)
-        {
-            string filePath = "C:\\Users\\LPA MASTER\\Desktop\\SensorData.txt"; // Specify the path to the file
-            try
-            {
-                // Append text to the existing file, creating it if it does not exist
-                using (StreamWriter file = new StreamWriter(filePath, append: true))
-                {
-                    file.WriteLine(data); // Write the raw data followed by a newline
-                }
-            }
-            catch (Exception ex)
-            {
-                _updateStatusAction($"Failed to write to file: {ex.Message}");
-            }
-        }
-
-        private void ResetBuffer()
-        {
-            _dataBuffer.Clear(); // Clears the data buffer to prevent processing of corrupted data
-            _updateStatusAction("Buffer has been reset due to error.");
-            // Optionally, you might want to log this incident or notify an administrator
-        }
-        private void ProcessBufferedData()
-        {
-            string bufferContent = _dataBuffer.ToString();
-            int indexOfLastNewLine = bufferContent.LastIndexOf('\n');
-
-            if (indexOfLastNewLine != -1)
-            {
-                string completeData = bufferContent.Substring(0, indexOfLastNewLine + 1);
-                _dataBuffer.Remove(0, indexOfLastNewLine + 1);
-
-                string[] lines = completeData.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                foreach (var line in lines)
-                {
-                    ProcessLine(line.Trim());
-                }
-            }
-        }
-
-        private void ProcessLine(string line)
-        {
-            if (line.StartsWith("{") || line.StartsWith("}"))
-            {
-                Console.WriteLine($"Ignored control line: {line}");
-                return;
-            }
-
-            if (line.Contains("Yes"))
-            {
-                _responseReceived.Set();
-                _lastSuccessfulOperation = DateTime.Now;
-                Console.WriteLine("Received confirmation response.");
-            }
-            else
+            string data = _serialPort.ReadExisting();
+            var lines = data.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (var line in lines)
             {
                 try
                 {
-                    Event evt = ParseEventFromLine(line, _currentPCode);
+                    var evt = ParseEvent(line, _serialPort.PortName);
                     if (evt != null)
                     {
-                        Console.WriteLine($"Parsed event: {JsonConvert.SerializeObject(evt)}");
-                        Task.Run(() => SendEventToBackendAsync(evt));
-                    }
-                    else
-                    {
-                        Console.WriteLine("Failed to parse line into an event.");
+                        _rabbitMQService.SendMessage(evt);
                     }
                 }
                 catch (Exception ex)
                 {
-                    _updateStatusAction($"Error parsing line: {ex.Message}");
+                    LogError(_serialPort.PortName, $"Failed to parse event from line '{line}': {ex.Message}");
                 }
             }
         }
 
         private void OnErrorReceived(object sender, SerialErrorReceivedEventArgs e)
         {
-            _updateStatusAction("Serial port error received.");
+            LogError("SerialPort", "Serial port error received.");
         }
+    }
 
+    public class RabbitMQService
+    {
+        private readonly IModel _channel;
 
-        private async Task ProcessCycleAsync(CancellationToken cancellationToken)
+        public RabbitMQService()
         {
-            try
-            {
-                while (true)  // Keep the cycle running indefinitely
-                {
-                    try
-                    {
-                        if (!_serialPort.IsOpen)
-                        {
-                            _serialPort.Open();
-                            _updateStatusAction("Serial port opened.");
-                        }
-
-                        foreach (var slave in _slavePcs)
-                        {
-                            _currentPCode = slave;
-                            _updateStatusAction($"Processing slave {_currentPCode}.");
-                            _responseReceived.Reset();  // Reset the event at the beginning of each cycle
-                            if (await SendAndWaitForConfirmation(slave))
-                            {
-                                if (!await RequestAndProcessData(slave))
-                                {
-                                    _updateStatusAction($"Failed to process data for {slave}, skipping.");
-                                }
-                            }
-                            else
-                            {
-                                _updateStatusAction($"Failed to receive confirmation from {slave}, skipping.");
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _updateStatusAction($"Error during cycle: {ex.Message}. Attempting to restart cycle...");
-                        await Task.Delay(5000); // Wait for 5 seconds before restarting the cycle
-                        continue; // Continue the while loop, restarting the cycle
-                    }
-                    finally
-                    {
-                        _lastSuccessfulOperation = DateTime.Now;
-                    }
-
-                    // Fetch areas from the repository
-                 /*   List<string> areas = await _eventRepository.GetAllAreas();
-                    if (areas != null && areas.Count > 0)
-                    {
-                        foreach (var area in areas)
-                        {
-                            // Write each area string to the Serial Port
-                            _serialPort.WriteLine(area);
-                            _updateStatusAction($"Sent to Serial: {area}");
-                        }
-                    }*/
-
-                        // Optionally, add a delay or perform other tasks
-                        await Task.Delay(1000); // Delay for a period to simulate processing time or manage pacing
-
-                    _lastSuccessfulOperation = DateTime.Now;
-
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Handling specific cycle error: {ex.Message}");
-                if (!cancellationToken.IsCancellationRequested)
-                {
-                    _updateStatusAction("Error in processing cycle, restarting...");
-                    await Task.Delay(5000); // Wait for 5 seconds before restarting the cycle
-                    await ProcessCycleAsync(cancellationToken); // Recursively restart the cycle
-                }
-            }
+            var factory = new ConnectionFactory() { HostName = "localhost" };
+            var connection = factory.CreateConnection();
+            _channel = connection.CreateModel();
+            _channel.QueueDeclare(queue: "events", durable: true, exclusive: false, autoDelete: false, arguments: null);
         }
 
-
-        private async Task<bool> SendAndWaitForConfirmation(string slaveId)
+        public void SendMessage(Event evt)
         {
-            // Console.WriteLine("Send and Wait For Confirmation");
-            _updateStatusAction($"Sending 'OK' command to {slaveId}.");
-            for (int i = 0; i < 2; i++)
-            {
-                _serialPort.WriteLine($"{slaveId} OK");
-                //  Console.WriteLine(slaveId);
-                await Task.Delay(1000);  // Ensure this delay is awaited
-
-                if (await WaitForResponseAsync($"{slaveId} Yes", TimeSpan.FromSeconds(3)))
-                {
-                    //  Console.WriteLine(slaveId);
-                    _updateStatusAction($"{slaveId} confirmed with 'Yes'.");
-                    return true;
-                }
-                else
-                {
-                    _updateStatusAction($"No confirmation from {slaveId}, attempt {i + 1}.");
-                }
-            }
-            return false;
+            var message = JsonConvert.SerializeObject(evt);
+            var body = Encoding.UTF8.GetBytes(message);
+            _channel.BasicPublish(exchange: "", routingKey: "events", basicProperties: null, body: body);
         }
-
-        private async Task<bool> WaitForResponseAsync(string expectedResponse, TimeSpan timeout)
-        {
-            // Console.WriteLine("Wait for response async");
-            _responseReceived.Reset(); // Ensure the event is ready for new signals
-
-            _serialPort.WriteLine($"{_currentPCode} OK");  // Ensure we're sending the correct command
-
-            bool received = await Task.Run(() => _responseReceived.WaitOne(timeout));  // Use Task.Run to prevent blocking the main thread
-            if (!received)
-            {
-                _updateStatusAction($"Timeout or wrong response after waiting for {expectedResponse}.");
-                return false;
-            }
-
-            _updateStatusAction($"{expectedResponse} received.");
-            return true;
-        }
-
-        private async Task<string> ReadLineAsync(TimeSpan timeout)
-        {
-            var taskCompletionSource = new TaskCompletionSource<string>();
-            var timer = new System.Timers.Timer(timeout.TotalMilliseconds); // Increase timeout if necessary
-            timer.Elapsed += (sender, e) =>
-            {
-                timer.Stop();
-                taskCompletionSource.TrySetResult(null); // Null indicates timeout
-                _updateStatusAction("Timeout occurred while reading line.");
-            };
-
-            timer.Start();
-
-            StringBuilder result = new StringBuilder();
-            try
-            {
-                while (_serialPort.IsOpen && !taskCompletionSource.Task.IsCompleted)
-                {
-                    if (_serialPort.BytesToRead > 0)
-                    {
-                        char readChar = (char)_serialPort.ReadChar();
-                        result.Append(readChar);
-                        if (readChar == '\n')
-                        {
-                            timer.Stop();
-                            taskCompletionSource.SetResult(result.ToString().Trim());
-                            break;
-                        }
-                    }
-                    else
-                    {
-                        await Task.Delay(10); // Brief delay to avoid tight loop
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                timer.Stop();
-                taskCompletionSource.SetException(ex);
-                _updateStatusAction($"Error while reading line: {ex.Message}");
-            }
-
-            return await taskCompletionSource.Task;
-        }
-
-        private async Task FetchAndSendApprovedIDs()
-        {/*
-        try
-        {
-            var approvedIds = await GetAllApprovedIDsAsync();
-            string concatenatedIds = String.Join(",", approvedIds);
-            foreach (var slave in _slavePcs)
-            {
-                await SendCommandAsync($"{slave} A,{concatenatedIds}");
-                bool isAcknowledged = await WaitForResponseAsync($"{slave} A OK", TimeSpan.FromSeconds(3));
-                if (!isAcknowledged)
-                {
-                    Console.WriteLine($"Warning: {slave} did not acknowledge the approved IDs.");
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error fetching or sending approved IDs: {ex.Message}");
-        }*/
-        }
-
-
-        private async Task<bool> ProcessDataAsync(string data, string pCode)
-        {
-            bool allSuccess = true; // Assume success unless an error occurs
-            string[] lines = data.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-
-            foreach (var line in lines)
-            {
-                if (!string.IsNullOrWhiteSpace(line))
-                {
-                    Event evt = ParseEventFromLine(line, pCode);
-                    if (evt != null)
-                    {
-                        bool success = await SendEventToBackendAsync(evt); // Ensure async operations are awaited
-                        if (!success)
-                        {
-                            _updateStatusAction($"Failed to send event data to backend for {line}.");
-                            allSuccess = false; // Set to false if any send fails
-                        }
-                    }
-                    else
-                    {
-                        _updateStatusAction("Failed to parse line into an event.");
-                        allSuccess = false; // Parsing failure also sets success to false
-                    }
-                }
-            }
-
-            return allSuccess; // Return the overall success status
-        }
-
-
-        private async Task<bool> RequestAndProcessData(string slaveId)
-        {
-            _updateStatusAction($"Requesting data from {slaveId}.");
-            _serialPort.WriteLine($"{slaveId} SDATAFULL");
-
-            StringBuilder dataBuilder = new StringBuilder();
-            bool endOfDataBlockDetected = false;
-
-            while (!endOfDataBlockDetected)
-            {
-                var line = await ReadLineAsync(TimeSpan.FromSeconds(3));
-                if (line == null) // Timeout occurred, no data received
-                {
-                    _updateStatusAction($"Timeout occurred or no more data received from {slaveId}.");
-                    _serialPort.WriteLine($"{slaveId} CLDATA"); // Command to clear data on the slave
-                    Console.WriteLine($"{slaveId} CLDATA");
-                    _serialPort.WriteLine($"{slaveId} CLDATA2"); // Additional command if needed
-                    Console.WriteLine($"{slaveId} CLDATA2");
-                    return false; // Signifies that there was a failure in receiving data
-                }
-
-                if (line.Contains('}')) // Check if the line contains the closing bracket for data block
-                {
-                    // Send clear data commands only after confirming successful processing
-                    _serialPort.WriteLine($"{slaveId} CLDATA"); // Command to clear data on the slave
-                    Console.WriteLine($"{slaveId} CLDATA");
-                    _serialPort.WriteLine($"{slaveId} CLDATA2"); // Additional command if needed
-                    Console.WriteLine($"{slaveId} CLDATA2");
-                    endOfDataBlockDetected = true;
-                }
-                else if (!string.IsNullOrWhiteSpace(line))
-                {
-                    dataBuilder.AppendLine(line);
-                }
-            }
-
-            if (dataBuilder.Length > 0)
-            {
-                _updateStatusAction($"Data received from {slaveId}. Processing...");
-                bool processSuccess = await ProcessDataAsync(dataBuilder.ToString(), slaveId);
-                if (processSuccess)
-                {
-                    // Send clear data commands only after confirming successful processing
-                    _serialPort.WriteLine($"{slaveId} CLDATA"); // Command to clear data on the slave
-                    Console.WriteLine($"{slaveId} CLDATA");
-                    _serialPort.WriteLine($"{slaveId} CLDATA2"); // Additional command if needed
-                    Console.WriteLine($"{slaveId} CLDATA2");
-                    _updateStatusAction($"Data processing completed and cleared for {slaveId}.");
-                }
-                else
-                {
-                    _updateStatusAction($"Failed to process data for {slaveId}.");
-                    _serialPort.WriteLine($"{slaveId} CLDATA"); // Command to clear data on the slave
-                    Console.WriteLine($"{slaveId} CLDATA");
-                    _serialPort.WriteLine($"{slaveId} CLDATA2"); // Additional command if needed
-                    Console.WriteLine($"{slaveId} CLDATA2");
-                }
-                return processSuccess;
-            }
-            return false;
-        }
-
-
-        private Event ParseEventFromLine(string line, string pCode)
-        {
-            // Console.WriteLine($"Attempting to parse line: {line}");
-            string[] parts = line.Trim().Split(new[] { ' ' }, 3);
-            if (parts.Length != 3 || !DateTime.TryParse(parts[1], out DateTime timestamp))
-            {
-                //     Console.WriteLine($"Invalid line format or timestamp: {line}");
-                return null; // Reject lines that do not meet the format requirements
-            }
-
-            string[] dataParts = parts[2].Split(',');
-            if (dataParts.Length < 2)
-            {
-                //       Console.WriteLine($"Insufficient data in line: {line}");
-                return null; // Ignore lines with insufficient data parts
-            }
-
-            string beaconId = dataParts[0].Trim();
-            string rssi = dataParts.Length > 1 ? dataParts[1].Trim() : "0";
-            string actionCode = dataParts.Length > 2 ? dataParts[2].Trim() : "L1";
-
-
-            Event evt = new Event
-            {
-                Id = Guid.NewGuid().ToString(),
-                SensorId = pCode,
-                EmployeeId = "-",
-                Timestamp = timestamp,
-                ProjectId = "4f24ac1f-6fd3-4a11-9613-c6a564f2bd86",
-                Action = GetActionFromCode(actionCode),
-                BeaconId = beaconId.Trim(),
-                Status = rssi,
-            };
-            //     Console.WriteLine($"Parsed event: {JsonConvert.SerializeObject(evt)}");
-            return evt;
-        }
-
-
-
-        private async Task<bool> SendEventToBackendAsync(Event evt)
-        {
-            //    Console.WriteLine($"Sending Event to Backend: {JsonConvert.SerializeObject(evt)}");
-            try
-            {
-                var response = await _eventRepository.CreateEventAsync(evt);
-                if (response != null && response.Id != null)
-                {
-                    //     Console.WriteLine($"Event successfully sent to backend with ID: {response.Id}");
-                    return true;
-                }
-                else
-                {
-                    //     Console.WriteLine("Failed to send event to backend or invalid response received.");
-                    return false;
-                }
-            }
-            catch (Exception ex)
-            {
-                // Console.WriteLine($"Error sending event to backend: {ex.Message}");
-                return false;
-            }
-        }
-
-
-
-
-        public void PauseProcessing()
-        {
-            _serialPort.Close();
-            _updateStatusAction("Serial processing paused.");
-        }
-
-        public async Task ResumeProcessingAsync()
-        {
-            if (!_serialPort.IsOpen)
-            {
-                _serialPort.Open();
-                _updateStatusAction("Serial processing resumed.");
-            }
-            await StartProcessingAsync();  // Assumes non-cancelled token for simplicity 
-        }
-
-
-        private void ProcessIncomingData(string data, string pCode)
-        {
-            string[] commands = data.Split('\n');  // Split by new line which is considered as end of a command
-
-            foreach (var command in commands)
-            {
-                var trimmedCommand = command.Trim();
-                if (!string.IsNullOrWhiteSpace(trimmedCommand) && trimmedCommand != "}")
-                {
-                    // Ignore the opening bracket and any empty lines
-                    if (trimmedCommand.StartsWith("{")) continue;
-
-                    // Assuming each command is a data line to be turned into an event
-                    try
-                    {
-                        Event evt = ParseEventFromLine(trimmedCommand, pCode);
-                        if (evt != null)
-                        {
-                            // Asynchronously send to the backend or queue for sending
-                            Task.Run(() => SendEventToBackendAsync(evt));
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _updateStatusAction($"Error processing command: {ex.Message}");
-                    }
-                }
-            }
-        }
-
-
-        private int GetActionFromCode(string code)
-        {
-            if (code.Contains(" "))
-            {
-                code = code.Split(' ')[0];
-            }
-
-            switch (code)
-            {
-                case "F1":
-                    return (int)ActionEnum.Avistado;
-                case "F0":
-                    return (int)ActionEnum.Avistado;
-                case "L1":
-                    return (int)ActionEnum.Perdido;
-                case "L0":
-                    return (int)ActionEnum.Perdido;
-                default:
-                    return -1;
-            }
-        }
-
-
     }
 }
+
 
 //STL = PROXIMO E LIBERADO
 //STB = PROXIMO E BLOQUEADO
