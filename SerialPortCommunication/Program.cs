@@ -30,7 +30,10 @@ namespace SerialPortCommunication
         private readonly RabbitMQService _rabbitMQService;
         private readonly List<string> _sensorSequence;
         private readonly HttpClient _httpClient;
-        private readonly string _apiBaseUrl = "https://your-api-url.com";
+
+        private readonly SerialPort _serialPort;
+        private readonly RabbitMQService _rabbitMQService;
+        private Dictionary<string, int> sensorThresholds;
 
         public SerialManager()
         {
@@ -42,9 +45,23 @@ namespace SerialPortCommunication
             };
             _serialPort.DataReceived += OnDataReceived;
             _serialPort.ErrorReceived += OnErrorReceived;
+
             _rabbitMQService = new RabbitMQService();
-            _httpClient = new HttpClient();
-            _sensorSequence = new List<string> { "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10", "P11", "P12", "P1B" }; // Initial order can be changed as needed
+
+            // Initialize the sensor thresholds
+            sensorThresholds = new Dictionary<string, int>
+            {
+                { "P1", 80 },
+                { "P2", 75 },
+                { "P3", 80 },
+                { "P4", 65 },
+                { "P5", 75 },
+                { "P6", 100 },
+                { "P7", 100 },
+                { "P8", 65 },
+                { "P9", 75 },
+                { "P1B", 200 }
+            };
         }
 
         public async Task InitializeAsync()
@@ -71,8 +88,8 @@ namespace SerialPortCommunication
             {
                 await SendCommandAndWaitForData($"{sensorCode} OK", $"{sensorCode} Yes");
                 string data = await SendCommandAndWaitForData($"{sensorCode} SDATAFULL", "}");
-                string value = "}";
-                if (!string.IsNullOrWhiteSpace(data) && !data.Contains(value) && !data.Contains("{" + sensorCode))
+
+                if (!string.IsNullOrWhiteSpace(data) && !data.Contains("}") && !data.Contains("{" + sensorCode))
                 {
                     ProcessData(data, sensorCode);
                 }
@@ -126,34 +143,38 @@ namespace SerialPortCommunication
 
         private Event ParseEvent(string data, string sensorCode)
         {
-            // Regex ajustada para extrair os componentes corretos e ignorar qualquer coisa após F1 ou L1
             var regex = new Regex(@"(?<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (?<beaconId>[^,]+?),\s*(?<status>\d{1,3}),\s*(?<actionCode>[FL]1)");
-            var match = regex.Match(data.Trim());
+            var match = regex.Match(data);
 
             if (match.Success)
             {
                 string timestamp = match.Groups["timestamp"].Value;
-                string beaconId = match.Groups["beaconId"].Value.Trim();
-                string status = match.Groups["status"].Value.Trim();
-                string actionCode = match.Groups["actionCode"].Value.Trim();
+                string beaconId = match.Groups["beaconId"].Value;
+                int status = int.Parse(match.Groups["status"].Value);
+                string actionCode = match.Groups["actionCode"].Value;
+
+                if (status > sensorThresholds[sensorCode])
+                {
+                    LogError(sensorCode, $"RSSI {status} exceeds threshold for {sensorCode} in data: '{data}'.");
+                    return null;
+                }
 
                 return new Event
                 {
                     Id = Guid.NewGuid().ToString(),
                     SensorId = sensorCode,
-                    EmployeeId = "-",  // as specified
+                    EmployeeId = "-",
                     Timestamp = DateTime.Parse(timestamp),
-                    ProjectId = "projectid",
-                    Action = actionCode == "F1" ? 3 : (actionCode == "L1" ? 7 : 0),  // Assuming no other values appear
+                    ProjectId = "4f24ac1f-6fd3-4a11-9613-c6a564f2bd86",
+                    Action = actionCode == "F1" ? 3 : 7,
                     BeaconId = beaconId,
-                    Status = status
+                    Status = status.ToString()
                 };
             }
             else
             {
-                // Here you should log or handle the failure to parse effectively
-                Console.WriteLine($"Failed to parse event from data: '{data}'.");
-                return null; // Or throw an exception depending on your error handling strategy
+                LogError(sensorCode, $"Invalid event format: {data}");
+                return null;
             }
         }
 
