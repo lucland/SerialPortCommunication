@@ -154,11 +154,14 @@ namespace SerialPortCommunication
         {
             try
             {
-                // Use ReadByte or Read to ensure no out-of-bound errors
                 int dataLength = _serialPort.BytesToRead;
                 byte[] buffer = new byte[dataLength];
-                int bytesRead = _serialPort.Read(buffer, 0, buffer.Length); // Safely read the data
+                int bytesRead = _serialPort.Read(buffer, 0, buffer.Length);
                 string incomingData = Encoding.ASCII.GetString(buffer, 0, bytesRead);
+
+                // Write raw data to file
+                WriteToFile(incomingData);
+
                 if (!string.IsNullOrEmpty(incomingData))
                 {
                     _dataBuffer.Append(incomingData);
@@ -168,7 +171,25 @@ namespace SerialPortCommunication
             catch (Exception ex)
             {
                 _updateStatusAction($"Error while receiving data: {ex.Message}");
-                ResetBuffer(); // Resetting the buffer on error
+                ResetBuffer();
+            }
+        }
+
+
+        private void WriteToFile(string data)
+        {
+            string filePath = "C:\\Users\\LPA MASTER\\Desktop\\SensorData.txt"; // Specify the path to the file
+            try
+            {
+                // Append text to the existing file, creating it if it does not exist
+                using (StreamWriter file = new StreamWriter(filePath, append: true))
+                {
+                    file.WriteLine(data); // Write the raw data followed by a newline
+                }
+            }
+            catch (Exception ex)
+            {
+                _updateStatusAction($"Failed to write to file: {ex.Message}");
             }
         }
 
