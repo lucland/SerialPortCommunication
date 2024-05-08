@@ -31,7 +31,6 @@ namespace SerialPortCommunication
         private readonly RabbitMQService _rabbitMQService;
         private Dictionary<string, int> sensorThresholds;
         private readonly HttpClient _httpClient;
-        private readonly string _apiBaseUrl = "https://your-api-url.com";
 
         public SerialManager()
         {
@@ -43,6 +42,7 @@ namespace SerialPortCommunication
             };
             _serialPort.DataReceived += OnDataReceived;
             _serialPort.ErrorReceived += OnErrorReceived;
+
             _rabbitMQService = new RabbitMQService();
             _httpClient = new HttpClient();
             sensorThresholds = new Dictionary<string, int> {
@@ -137,20 +137,19 @@ namespace SerialPortCommunication
 
         private Event ParseEvent(string data, string sensorCode)
         {
-            // Regex ajustada para extrair os componentes corretos e ignorar qualquer coisa após F1 ou L1
             var regex = new Regex(@"(?<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (?<beaconId>[^,]+?),\s*(?<status>\d{1,3}),\s*(?<actionCode>[FL]1)");
-            var match = regex.Match(data.Trim());
+            var match = regex.Match(data);
 
             if (match.Success)
             {
                 string timestamp = match.Groups["timestamp"].Value;
-                string beaconId = match.Groups["beaconId"].Value.Trim();
-                string status = match.Groups["status"].Value.Trim();
-                string actionCode = match.Groups["actionCode"].Value.Trim();
+                string beaconId = match.Groups["beaconId"].Value;
+                int status = int.Parse(match.Groups["status"].Value);
+                string actionCode = match.Groups["actionCode"].Value;
 
-                if (int.Parse(status) > sensorThresholds[sensorCode])
+                if (status > sensorThresholds[sensorCode])
                 {
-                    LogError(sensorCode, $"Status {status} exceeds threshold for {sensorCode} in data: '{data}'.");
+                    LogError(sensorCode, $"RSSI {status} exceeds threshold for {sensorCode} in data: '{data}'.");
                     return null;
                 }
 
@@ -158,12 +157,12 @@ namespace SerialPortCommunication
                 {
                     Id = Guid.NewGuid().ToString(),
                     SensorId = sensorCode,
-                    EmployeeId = "-",  // as specified
+                    EmployeeId = "-",
                     Timestamp = DateTime.Parse(timestamp),
                     ProjectId = "4f24ac1f-6fd3-4a11-9613-c6a564f2bd86",
                     Action = actionCode == "F1" ? 3 : (actionCode == "L1" ? 7 : 7),  // Assuming no other values appear
                     BeaconId = beaconId,
-                    Status = status
+                    Status = status.ToString()
                 };
             }
             else
