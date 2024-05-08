@@ -39,6 +39,7 @@ namespace SerialPortCommunication.Repositories
             var json = JsonConvert.SerializeObject(eventItem);
             var response = await PostAsync("https://gmarineinnovation.com/api/v1/events", json, "Event");
             Console.WriteLine("Event created.");
+            Console.WriteLine(response);
             return JsonConvert.DeserializeObject<Event>(response);
         }
 

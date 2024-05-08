@@ -12,6 +12,7 @@ using System.Text.RegularExpressions;
 using SerialPortCommunication.Models;
 using static System.Runtime.InteropServices.JavaScript.JSType;
 using SerialPortCommunication.Repositories;
+using SerialPortCommunication.Services;
 
 namespace SerialPortCommunication
 {
@@ -266,22 +267,31 @@ namespace SerialPortCommunication
     public class RabbitMQService
     {
         private readonly IModel _channel;
+        private readonly EventRepository _eventRepository;
 
         public RabbitMQService()
         {
+            _eventRepository = new EventRepository(apiService: new ApiService());
             var factory = new ConnectionFactory() { HostName = "localhost" };
             var connection = factory.CreateConnection();
             _channel = connection.CreateModel();
             _channel.QueueDeclare(queue: "events", durable: true, exclusive: false, autoDelete: false, arguments: null);
         }
 
-        public void SendMessage(Event evt)
+        public async Task SendMessageAsync(Event evt)
         {
             if (evt == null) return;  // Do not attempt to send null events
-            Console.WriteLine($"RabbitMQ Service: {evt}");
             var message = JsonConvert.SerializeObject(evt);
             var body = Encoding.UTF8.GetBytes(message);
             _channel.BasicPublish(exchange: "", routingKey: "events", basicProperties: null, body: body);
+
+            // Send the event to the backend
+            await SendToBackendAsync(evt);
+        }
+
+        private async Task SendToBackendAsync(Event evt)
+        {
+           await _eventRepository.CreateEventAsync(evt);
         }
     }
 }
