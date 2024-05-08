@@ -34,6 +34,7 @@ namespace SerialPortCommunication
         private Dictionary<string, int> sensorThresholds;
         private readonly HttpClient _httpClient;
         private string currentSensor;
+        private readonly List<string> _sensors;
 
         public SerialManager()
         {
@@ -55,6 +56,7 @@ namespace SerialPortCommunication
                 { "P1B", 100 }
             };
             currentSensor = "P1";
+            _sensors = sensorThresholds.Keys.ToList();
         }
 
         public async Task InitializeAsync()
@@ -70,15 +72,14 @@ namespace SerialPortCommunication
 
         private async Task StartCycleAsync()
         {
-            Console.WriteLine("Start Cycle Async");
-            foreach (var sensorCode in sensorThresholds.Keys)
+            while (true) // Loop to continuously cycle through sensors
             {
-                currentSensor = sensorCode;
-                if (!await HandleSensorCycle(sensorCode))
+                foreach (var sensor in _sensors)
                 {
-                    Console.WriteLine($"Restarting cycle due to failure with {sensorCode}");
-                    await StartCycleAsync(); // Restart from the beginning if any error occurs
-                    break; // Break out of the loop after restarting
+                    if (!await HandleSensorCycle(sensor))
+                    {
+                        Console.WriteLine($"Failed to handle {sensor}, skipping to next.");
+                    }
                 }
             }
         }
@@ -90,63 +91,75 @@ namespace SerialPortCommunication
                 if (!await SendCommandAndWaitForConfirmation($"{sensorCode} OK", $"{sensorCode} Yes"))
                 {
                     Console.WriteLine($"No response or incorrect response from {sensorCode}, skipping to next sensor.");
-                    return true; // Skip to the next sensor
+                    return false;
                 }
 
                 string data = await SendCommandAndWaitForData($"{sensorCode} SDATAFULL", "}");
-                if (!string.IsNullOrWhiteSpace(data) && !data.EndsWith("}"))
+                if (!string.IsNullOrWhiteSpace(data) && !data.Contains("}"))
                 {
                     ProcessData(data, sensorCode);
                 }
-
+                await Task.Delay(50); // Small delay before sending clean up commands
                 await SendCommandAndWaitForData($"{sensorCode} CLDATA", $"{sensorCode} CLDATA OK");
                 await SendCommandAndWaitForData($"{sensorCode} CLDATA2", $"{sensorCode} CLDATA2 OK");
                 return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error handling {sensorCode}: {ex.Message}");
-                return false; // Return false to indicate an error occurred
+                Console.WriteLine($"Error during cycle with {sensorCode}: {ex.Message}");
+                return false;
             }
         }
 
         private async Task<bool> SendCommandAndWaitForConfirmation(string command, string expectedResponse)
         {
-            Console.WriteLine($"Sending command: {command}");
             _serialPort.WriteLine(command);
-            await Task.Delay(500); // Small delay to allow buffer to fill
-            var response = _serialPort.ReadExisting();
-            return response.Contains(expectedResponse);
+            await Task.Delay(50); // Let the buffer fill
+            var timer = new System.Timers.Timer(3000);
+            bool receivedCorrectResponse = false;
+
+            void handler(object sender, SerialDataReceivedEventArgs args)
+            {
+                var response = _serialPort.ReadExisting();
+                if (response.Contains(expectedResponse))
+                {
+                    receivedCorrectResponse = true;
+                    timer.Stop(); // Stop the timer on receiving correct response
+                }
+            }
+
+            _serialPort.DataReceived += handler;
+            timer.Elapsed += (sender, args) => {
+                _serialPort.DataReceived -= handler; // Unsubscribe from event
+                timer.Stop();
+            };
+            timer.Start();
+            await Task.Delay(3000); // Wait for the response or timeout
+            _serialPort.DataReceived -= handler; // Ensure handler is unsubscribed after timeout
+
+            return receivedCorrectResponse;
         }
 
         private async Task<string> SendCommandAndWaitForData(string command, string endMarker)
         {
             Console.WriteLine($"Sending command for data: {command}");
             _serialPort.WriteLine(command);
-            await Task.Delay(50); // Wait for data to start arriving
-
-            var timer = new System.Timers.Timer(3000); // Set a 3-second timeout
-            timer.Start();
-
             StringBuilder response = new StringBuilder();
-            string temp;
-            while (!timer.Enabled || !response.ToString().Contains(endMarker))
+            var completionSource = new TaskCompletionSource<string>();
+
+            void handler(object sender, SerialDataReceivedEventArgs args)
             {
-                if (_serialPort.BytesToRead > 0)
+                var data = _serialPort.ReadExisting();
+                response.Append(data);
+                if (data.Contains(endMarker))
                 {
-                    temp = _serialPort.ReadExisting();
-                    response.Append(temp);
-                    if (temp.Contains(endMarker)) break;
+                    _serialPort.DataReceived -= handler;
+                    completionSource.SetResult(response.ToString());
                 }
             }
 
-            timer.Stop();
-            if (!response.ToString().Contains(endMarker))
-            {
-                Console.WriteLine("Timeout or incomplete data received.");
-                return null; // Return null to indicate a timeout or incomplete data
-            }
-            return response.ToString();
+            _serialPort.DataReceived += handler;
+            return await completionSource.Task;
         }
 
         private async Task<string> ReadResponseUntilMarker(string marker)
