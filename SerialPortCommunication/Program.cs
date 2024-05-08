@@ -35,10 +35,17 @@ namespace SerialPortCommunication
         private readonly HttpClient _httpClient;
         private string currentSensor;
         private readonly List<string> _sensors;
+        private readonly ManualResetEventSlim responseReceived = new ManualResetEventSlim(false);
+        private string lastResponse = string.Empty;
 
         public SerialManager()
         {
-            _serialPort = new SerialPort("COM3", 115200);
+            _serialPort = new SerialPort("COM3", 115200, Parity.None, 8, StopBits.One)
+            {
+                Handshake = Handshake.None,
+                ReadTimeout = 1000,
+                WriteTimeout = 1000
+            };
             _serialPort.DataReceived += OnDataReceived;
             _serialPort.ErrorReceived += OnErrorReceived;
 
@@ -103,35 +110,26 @@ namespace SerialPortCommunication
 
         private async Task<bool> SendCommandAndWaitForConfirmation(string command, string expectedResponse)
         {
-            Console.WriteLine($"Command sent: {command}. Waiting for '{expectedResponse}'...");
+            Console.WriteLine($"Sending command: {command}");
+            lastResponse = "";
+            responseReceived.Reset();
             _serialPort.WriteLine(command);
-            StringBuilder responseBuffer = new StringBuilder();
-            ManualResetEventSlim waitHandle = new ManualResetEventSlim(false);
 
-            SerialDataReceivedEventHandler handler = (sender, args) =>
-            {
-                string data = _serialPort.ReadExisting();
-                Console.WriteLine($"Received: {data}");  // For debugging
-                responseBuffer.Append(data);
-                if (responseBuffer.ToString().Contains(expectedResponse))
-                {
-                    waitHandle.Set();
-                }
-            };
-
-            _serialPort.DataReceived += handler;
-
-            // Wait for a response or timeout
-            bool received = waitHandle.Wait(3000);  // Wait for up to 3000 ms
-            _serialPort.DataReceived -= handler;  // Always remove handler
-
-            return received && responseBuffer.ToString().Contains(expectedResponse);
+            // Wait for the signal to be set in the OnDataReceived handler or timeout after 3000 ms
+            bool received = responseReceived.Wait(3000);
+            return received && lastResponse.Contains(expectedResponse);
         }
 
         private async Task<string> SendCommandAndWaitForData(string command, string endMarker)
         {
+            Console.WriteLine($"Sending command for data: {command}");
+            lastResponse = "";
+            responseReceived.Reset();
             _serialPort.WriteLine(command);
-            return await ReadResponseUntilMarker(endMarker, 3000); // Use a timeout for data responses
+
+            // Wait for the signal to be set in the OnDataReceived handler or timeout after 3000 ms
+            responseReceived.Wait(3000);
+            return lastResponse.Contains(endMarker) ? lastResponse : null;
         }
 
         private async Task<string> ReadResponseUntilMarker(string marker, int timeout)
@@ -162,13 +160,13 @@ namespace SerialPortCommunication
             return await completionSource.Task;
         }
 
-        private async void ProcessData(string data, string sensorCode)
+        private void ProcessData(string data, string sensorCode)
         {
-            Console.WriteLine($"Process Data: {data}, sensor code: {sensorCode}");
+            Console.WriteLine($"Processing data: {data}, sensor code: {sensorCode}");
             var events = ParseEvents(data, sensorCode);
             foreach (var evt in events)
             {
-                await _rabbitMQService.SendMessageAsync(evt);
+                _rabbitMQService.SendMessageAsync(evt);
             }
         }
 
@@ -231,7 +229,12 @@ namespace SerialPortCommunication
         private void OnDataReceived(object sender, SerialDataReceivedEventArgs e)
         {
             string data = _serialPort.ReadExisting();
-            Console.WriteLine($"On Data Received: {data}");
+            Console.WriteLine($"Received data: {data}");
+            lastResponse += data;
+            if (data.Contains(currentSensor + " Yes") || data.Contains("}"))
+            {
+                responseReceived.Set();
+            }
         }
 
         private void OnErrorReceived(object sender, SerialErrorReceivedEventArgs e)
