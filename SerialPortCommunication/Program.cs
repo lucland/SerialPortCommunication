@@ -38,12 +38,7 @@ namespace SerialPortCommunication
 
         public SerialManager()
         {
-            _serialPort = new SerialPort("COM3", 115200, Parity.None, 8, StopBits.One)
-            {
-                Handshake = Handshake.None,
-                ReadTimeout = 1000,
-                WriteTimeout = 1000
-            };
+            _serialPort = new SerialPort("COM3", 115200);
             _serialPort.DataReceived += OnDataReceived;
             _serialPort.ErrorReceived += OnErrorReceived;
 
@@ -86,16 +81,10 @@ namespace SerialPortCommunication
 
         private async Task<bool> HandleSensorCycle(string sensorCode)
         {
-            try
+            if (await SendCommandAndWaitForConfirmation($"{sensorCode} OK", $"{sensorCode} Yes"))
             {
-                if (!await SendCommandAndWaitForConfirmation($"{sensorCode} OK", $"{sensorCode} Yes"))
-                {
-                    Console.WriteLine($"No response or incorrect response from {sensorCode}, skipping to next sensor.");
-                    return false;
-                }
-
                 string data = await SendCommandAndWaitForData($"{sensorCode} SDATAFULL", "}");
-                if (!string.IsNullOrWhiteSpace(data) && !data.Contains("}"))
+                if (!string.IsNullOrWhiteSpace(data) && !data.EndsWith("}"))
                 {
                     ProcessData(data, sensorCode);
                 }
@@ -104,46 +93,49 @@ namespace SerialPortCommunication
                 await SendCommandAndWaitForData($"{sensorCode} CLDATA2", $"{sensorCode} CLDATA2 OK");
                 return true;
             }
-            catch (Exception ex)
+            else
             {
-                Console.WriteLine($"Error during cycle with {sensorCode}: {ex.Message}");
+                Console.WriteLine($"No response or incorrect response from {sensorCode}, skipping to next sensor.");
                 return false;
             }
         }
 
+
         private async Task<bool> SendCommandAndWaitForConfirmation(string command, string expectedResponse)
         {
+            Console.WriteLine($"Command sent: {command}. Waiting for '{expectedResponse}'...");
             _serialPort.WriteLine(command);
-            await Task.Delay(50); // Let the buffer fill
-            var timer = new System.Timers.Timer(3000);
-            bool receivedCorrectResponse = false;
+            StringBuilder responseBuffer = new StringBuilder();
+            ManualResetEventSlim waitHandle = new ManualResetEventSlim(false);
 
-            void handler(object sender, SerialDataReceivedEventArgs args)
+            SerialDataReceivedEventHandler handler = (sender, args) =>
             {
-                var response = _serialPort.ReadExisting();
-                if (response.Contains(expectedResponse))
+                string data = _serialPort.ReadExisting();
+                Console.WriteLine($"Received: {data}");  // For debugging
+                responseBuffer.Append(data);
+                if (responseBuffer.ToString().Contains(expectedResponse))
                 {
-                    receivedCorrectResponse = true;
-                    timer.Stop(); // Stop the timer on receiving correct response
+                    waitHandle.Set();
                 }
-            }
+            };
 
             _serialPort.DataReceived += handler;
-            timer.Elapsed += (sender, args) => {
-                _serialPort.DataReceived -= handler; // Unsubscribe from event
-                timer.Stop();
-            };
-            timer.Start();
-            await Task.Delay(3000); // Wait for the response or timeout
-            _serialPort.DataReceived -= handler; // Ensure handler is unsubscribed after timeout
 
-            return receivedCorrectResponse;
+            // Wait for a response or timeout
+            bool received = waitHandle.Wait(3000);  // Wait for up to 3000 ms
+            _serialPort.DataReceived -= handler;  // Always remove handler
+
+            return received && responseBuffer.ToString().Contains(expectedResponse);
         }
 
         private async Task<string> SendCommandAndWaitForData(string command, string endMarker)
         {
-            Console.WriteLine($"Sending command for data: {command}");
             _serialPort.WriteLine(command);
+            return await ReadResponseUntilMarker(endMarker, 3000); // Use a timeout for data responses
+        }
+
+        private async Task<string> ReadResponseUntilMarker(string marker, int timeout)
+        {
             StringBuilder response = new StringBuilder();
             var completionSource = new TaskCompletionSource<string>();
 
@@ -151,7 +143,7 @@ namespace SerialPortCommunication
             {
                 var data = _serialPort.ReadExisting();
                 response.Append(data);
-                if (data.Contains(endMarker))
+                if (data.Contains(marker))
                 {
                     _serialPort.DataReceived -= handler;
                     completionSource.SetResult(response.ToString());
@@ -159,26 +151,15 @@ namespace SerialPortCommunication
             }
 
             _serialPort.DataReceived += handler;
-            return await completionSource.Task;
-        }
+            var timer = new System.Timers.Timer(timeout) { AutoReset = false };
+            timer.Elapsed += (sender, args) => {
+                _serialPort.DataReceived -= handler;
+                completionSource.TrySetResult(response.ToString()); // Ensure to return whatever was received even if incomplete
+                timer.Stop();
+            };
+            timer.Start();
 
-        private async Task<string> ReadResponseUntilMarker(string marker)
-        {
-            Console.WriteLine("Read Response Until Marker");
-            StringBuilder response = new StringBuilder();
-            var taskCompletionSource = new TaskCompletionSource<string>();
-            void handler(object sender, SerialDataReceivedEventArgs args)
-            {
-                var data = _serialPort.ReadExisting();
-                response.Append(data);
-                if (data.Contains(marker))
-                {
-                    _serialPort.DataReceived -= handler;
-                    taskCompletionSource.SetResult(response.ToString());
-                }
-            }
-            _serialPort.DataReceived += handler;
-            return await taskCompletionSource.Task;
+            return await completionSource.Task;
         }
 
         private async void ProcessData(string data, string sensorCode)
@@ -251,23 +232,6 @@ namespace SerialPortCommunication
         {
             string data = _serialPort.ReadExisting();
             Console.WriteLine($"On Data Received: {data}");
-            var lines = data.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            foreach (var line in lines)
-            {
-                try
-                {
-                    Console.WriteLine($"On Data Received LINE: {line}");
-                    var evt = ParseEvent(line, currentSensor);
-                    if (evt != null)
-                    {
-                        _rabbitMQService.SendMessageAsync(evt);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    LogError(currentSensor, $"Failed to parse event from line '{line}': {ex.Message}");
-                }
-            }
         }
 
         private void OnErrorReceived(object sender, SerialErrorReceivedEventArgs e)
