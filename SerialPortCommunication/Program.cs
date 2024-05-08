@@ -116,16 +116,18 @@ namespace SerialPortCommunication
             receivedData = "";
             responseReceived.Reset();
             _serialPort.WriteLine(command);
-
+            Console.WriteLine($"Waiting for response for {command}");
+            Console.WriteLine($"Expected response: {expectedResponse}");
+            Console.WriteLine($"Received data: {receivedData}");
             bool isReceived = responseReceived.Wait(3000); // Wait up to 3 seconds for the response
-            if (isReceived && receivedData.Contains(expectedResponse))
+            if (isReceived && receivedData == expectedResponse)
             {
                 Console.WriteLine($"Received correct response for {command}");
                 return true;
             }
             else
             {
-                Console.WriteLine($"No correct response received for {command}, data received: '{receivedData}'");
+                Console.WriteLine($"No correct response received for {command}, data received:'{receivedData}'");
                 return false;
             }
         }
@@ -244,6 +246,8 @@ namespace SerialPortCommunication
             receivedData.Trim();
             //remove any line breaks from received data
             receivedData = receivedData.Replace("\n", "").Replace("\r", "");
+            //remove any leading or trailing whitespace
+            receivedData = receivedData.Trim();
             if (receivedData.Contains(currentSensor + " Yes"))
             {
                 responseReceived.Set(); // Only set the event if the expected response is fully received
