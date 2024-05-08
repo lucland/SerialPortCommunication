@@ -91,6 +91,7 @@ namespace SerialPortCommunication
         {
             if (await SendCommandAndWaitForConfirmation($"{sensorCode} OK", $"{sensorCode} Yes"))
             {
+                receivedData = ""; // Clear the received data before processing new data
                 string data = await SendCommandAndWaitForData($"{sensorCode} SDATAFULL", "}");
                 if (!string.IsNullOrWhiteSpace(data) && !data.EndsWith("}"))
                 {
@@ -113,23 +114,20 @@ namespace SerialPortCommunication
         {
             Console.WriteLine($"Sending command: {command}");
             _serialPort.DiscardInBuffer(); // Clear the buffer to ensure no old data is processed
-            receivedData = "";
             responseReceived.Reset();
             _serialPort.WriteLine(command);
             Console.WriteLine($"Waiting for response for {command}");
             Console.WriteLine($"Expected response: {expectedResponse}");
             Console.WriteLine($"Received data: {receivedData}");
 
-            bool isReceived = await Task.Run(() =>
-            {
-                if (responseReceived.Wait(3000)) // Wait up to 3 seconds for the response
-                {
-                    return receivedData == expectedResponse || receivedData.Contains(expectedResponse);
-                }
-                return false;
-            });
+            bool isReceived = await Task.Run(() => responseReceived.Wait(3000)); // Wait up to 3 seconds for the response
 
-            if (isReceived)
+            if (isReceived && receivedData == expectedResponse)
+            {
+                Console.WriteLine($"Received correct response for {command}");
+                return true;
+            }
+            else if (isReceived && receivedData.Contains(expectedResponse))
             {
                 Console.WriteLine($"Received correct response for {command}");
                 return true;
