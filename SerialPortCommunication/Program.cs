@@ -44,8 +44,8 @@ namespace SerialPortCommunication
             _serialPort = new SerialPort("COM3", 115200, Parity.None, 8, StopBits.One)
             {
                 Handshake = Handshake.None,
-                ReadTimeout = 1000,
-                WriteTimeout = 1000
+                ReadTimeout = 5000,
+                WriteTimeout = 5000
             };
             _serialPort.DataReceived += OnDataReceived;
             _serialPort.ErrorReceived += OnErrorReceived;
@@ -53,10 +53,10 @@ namespace SerialPortCommunication
             _rabbitMQService = new RabbitMQService();
             _httpClient = new HttpClient();
             sensorThresholds = new Dictionary<string, int> {
-                { "P1", 80 }, { "P2", 75 }, { "P3", 80 },
+                { "P1B", 100 }, { "P2", 75 }, { "P3", 80 },
                 { "P4", 65 }, { "P5", 70 }, { "P6", 100 },
                 { "P7", 100 }, { "P8", 65 }, { "P9", 75 },
-                { "P1B", 100 }
+                { "P1", 100 }
             };
             currentSensor = "P1";
             _sensors = sensorThresholds.Keys.ToList();
@@ -79,6 +79,7 @@ namespace SerialPortCommunication
             {
                 foreach (var sensor in _sensors)
                 {
+                    currentSensor = sensor;
                     if (!await HandleSensorCycle(sensor))
                     {
                         Console.WriteLine($"Failed to handle {sensor}, skipping to next.");
@@ -91,6 +92,7 @@ namespace SerialPortCommunication
         {
             if (await SendCommandAndWaitForConfirmation($"{sensorCode} OK", $"{sensorCode} Yes"))
             {
+                receivedData = "";
                 string data = await SendCommandAndWaitForData($"{sensorCode} SDATAFULL", "}");
                 if (!string.IsNullOrWhiteSpace(data) && !data.EndsWith("}"))
                 {
@@ -113,22 +115,22 @@ namespace SerialPortCommunication
         {
             Console.WriteLine($"Sending command: {command}");
             _serialPort.DiscardInBuffer(); // Clear the buffer to ensure no old data is processed
-            receivedData = "";
             responseReceived.Reset();
             _serialPort.WriteLine(command);
             Console.WriteLine($"Waiting for response for {command}");
             Console.WriteLine($"Expected response: {expectedResponse}");
             Console.WriteLine($"Received data: {receivedData}");
-            receivedData = _serialPort.ReadLine();
             bool isReceived = responseReceived.Wait(3000); // Wait up to 3 seconds for the response
-            if (isReceived && receivedData == expectedResponse)
+            if (isReceived && receivedData.ToString().Contains(expectedResponse))
             {
                 Console.WriteLine($"Received correct response for {command}");
+                receivedData = string.Empty;
                 return true;
             }
             else
             {
                 Console.WriteLine($"No correct response received for {command}, data received:'{receivedData}'");
+                receivedData = string.Empty;
                 return false;
             }
         }
@@ -249,16 +251,24 @@ namespace SerialPortCommunication
                 if (data.Contains("Yes"))
                 {
                     receivedData = data;
+                    Console.WriteLine($"receivedData CONTAINS Yes raw data: {receivedData}");
+                    receivedData = receivedData.Replace("\n", "").Replace("\r", "");
+                    receivedData = receivedData.Trim();
+                    Console.WriteLine($"receivedData TRIM: {receivedData}");
                 } else
                 {
-
                     receivedData += data;
                 }
             }
-            receivedData = receivedData.Trim();
+            
             if (receivedData.Contains(currentSensor + " Yes"))
             {
+                Console.WriteLine($"Contains raw data: {receivedData}");
                 responseReceived.Set(); // Only set the event if the expected response is fully received
+            }
+            else
+            {
+                Console.WriteLine($"receivedData raw data DO NOT CONTAIN: {currentSensor} Yes");
             }
         }
 
