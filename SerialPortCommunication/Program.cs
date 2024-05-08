@@ -35,6 +35,7 @@ namespace SerialPortCommunication
         private readonly HttpClient _httpClient;
         private string currentSensor;
         private readonly List<string> _sensors;
+        private string receivedData = "";
         private readonly ManualResetEventSlim responseReceived = new ManualResetEventSlim(false);
         private string lastResponse = string.Empty;
 
@@ -111,13 +112,22 @@ namespace SerialPortCommunication
         private async Task<bool> SendCommandAndWaitForConfirmation(string command, string expectedResponse)
         {
             Console.WriteLine($"Sending command: {command}");
-            lastResponse = "";
+            _serialPort.DiscardInBuffer(); // Clear the buffer to ensure no old data is processed
+            receivedData = "";
             responseReceived.Reset();
             _serialPort.WriteLine(command);
 
-            // Wait for the signal to be set in the OnDataReceived handler or timeout after 3000 ms
-            bool received = responseReceived.Wait(3000);
-            return received && lastResponse.Contains(expectedResponse);
+            bool isReceived = responseReceived.Wait(3000); // Wait up to 3 seconds for the response
+            if (isReceived && receivedData.Contains(expectedResponse))
+            {
+                Console.WriteLine($"Received correct response for {command}");
+                return true;
+            }
+            else
+            {
+                Console.WriteLine($"No correct response received for {command}, data received: '{receivedData}'");
+                return false;
+            }
         }
 
         private async Task<string> SendCommandAndWaitForData(string command, string endMarker)
@@ -229,11 +239,12 @@ namespace SerialPortCommunication
         private void OnDataReceived(object sender, SerialDataReceivedEventArgs e)
         {
             string data = _serialPort.ReadExisting();
-            Console.WriteLine($"Received data: {data}");
-            lastResponse += data;
-            if (data.Contains(currentSensor + " Yes") || data.Contains("}"))
+            Console.WriteLine($"Received raw data: {data}");
+            receivedData += data;
+            receivedData.Trim();
+            if (receivedData.Contains(currentSensor + " Yes"))
             {
-                responseReceived.Set();
+                responseReceived.Set(); // Only set the event if the expected response is fully received
             }
         }
 
