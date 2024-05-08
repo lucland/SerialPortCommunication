@@ -87,46 +87,47 @@ namespace SerialPortCommunication
             Console.WriteLine($"Handling sensor: {sensorCode}");
             string command = $"{sensorCode} SDATAFULL";
             _serialPort.WriteLine(command);
-            await Task.Delay(1000); // Short delay to ensure command is sent before reading
-
             StringBuilder data = new StringBuilder();
-            var timeoutTask = Task.Delay(3000); // Set a 5-second timeout for response
+            var lastDataReceivedTime = DateTime.Now;
 
             while (true)
             {
                 if (_serialPort.BytesToRead > 0)
                 {
-                   
-                        data.Append(_serialPort.ReadExisting());
-                        Console.WriteLine($"DATA:{data}");
-                
-                    
+                    string received = _serialPort.ReadExisting();
+                    data.Append(received);
+                    Console.WriteLine($"DATA from {sensorCode}: {received}");
+                    lastDataReceivedTime = DateTime.Now; // Reset timer on data received
                 }
-                if (data.ToString().Trim().Contains("}")) break;
-                if (await Task.WhenAny(timeoutTask) == timeoutTask)
+
+                if (DateTime.Now - lastDataReceivedTime > TimeSpan.FromSeconds(5))
                 {
-                    Console.WriteLine($"TIMEOUT data: {timeoutTask} from sensor: {sensorCode}");
-                    break;
-                } // Timeout
+                    Console.WriteLine($"Timeout or end of data block from {sensorCode}");
+                    break; // Break the loop if no data for 3 seconds
+                }
+
+                await Task.Delay(100); // Reduce CPU usage
             }
 
-            if (!string.IsNullOrWhiteSpace(data.ToString().Trim()) && !data.ToString().Trim().Contains(" OK"))
+            // Process data if it's a valid block (ignoring empty or just opened commands)
+            if (!string.IsNullOrWhiteSpace(data.ToString()) && data.ToString().Contains("}"))
             {
-                Console.WriteLine($"Handling data: {data.ToString().Trim()} from sensor: {sensorCode}");
-                ProcessData(data.ToString().Trim(), sensorCode);
-                await Task.Delay(3000);
-                _serialPort.WriteLine($"{sensorCode} CLDATA");
-                Console.WriteLine($"{sensorCode} CLDATA");
-                _serialPort.WriteLine($"{sensorCode} CLDATA2");
-                Console.WriteLine($"{sensorCode} CLDATA2");
+                Console.WriteLine($"Processing data from {sensorCode}");
+                ProcessData(data.ToString(), sensorCode);
+            }
+            else
+            {
+                Console.WriteLine($"No valid data received from {sensorCode} or incomplete data block.");
             }
 
-            
-            await Task.Delay(3000);
+            // Cleaning commands
+            _serialPort.WriteLine($"{sensorCode} CLDATA");
+            _serialPort.WriteLine($"{sensorCode} CLDATA2");
         }
 
 
-     
+
+
 
         private void ProcessData(string data, string sensorCode)
         {
