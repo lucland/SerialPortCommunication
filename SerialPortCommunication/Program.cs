@@ -31,6 +31,7 @@ namespace SerialPortCommunication
         private readonly RabbitMQService _rabbitMQService;
         private Dictionary<string, int> sensorThresholds;
         private readonly HttpClient _httpClient;
+        private string currentSensor;
 
         public SerialManager()
         {
@@ -51,6 +52,7 @@ namespace SerialPortCommunication
                 { "P7", 100 }, { "P8", 65 }, { "P9", 75 },
                 { "P1B", 100 }
             };
+            currentSensor = "P1";
         }
 
         public async Task InitializeAsync()
@@ -69,35 +71,80 @@ namespace SerialPortCommunication
             Console.WriteLine("Start Cycle Async");
             foreach (var sensorCode in sensorThresholds.Keys)
             {
-                await HandleSensorCycle(sensorCode);
+                currentSensor = sensorCode;
+                if (!await HandleSensorCycle(sensorCode))
+                {
+                    Console.WriteLine($"Restarting cycle due to failure with {sensorCode}");
+                    await StartCycleAsync(); // Restart from the beginning if any error occurs
+                    break; // Break out of the loop after restarting
+                }
             }
         }
 
-        private async Task HandleSensorCycle(string sensorCode)
+        private async Task<bool> HandleSensorCycle(string sensorCode)
         {
-            Console.WriteLine($"Handle Sensor Cycle {sensorCode}");
             try
             {
+                if (!await SendCommandAndWaitForConfirmation($"{sensorCode} OK", $"{sensorCode} Yes"))
+                {
+                    Console.WriteLine($"No response or incorrect response from {sensorCode}, skipping to next sensor.");
+                    return true; // Skip to the next sensor
+                }
+
                 string data = await SendCommandAndWaitForData($"{sensorCode} SDATAFULL", "}");
                 if (!string.IsNullOrWhiteSpace(data) && !data.EndsWith("}"))
                 {
                     ProcessData(data, sensorCode);
                 }
+
                 await SendCommandAndWaitForData($"{sensorCode} CLDATA", $"{sensorCode} CLDATA OK");
                 await SendCommandAndWaitForData($"{sensorCode} CLDATA2", $"{sensorCode} CLDATA2 OK");
+                return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"ERROR in Handle Sensor Cycle {sensorCode}");
-                LogError(sensorCode, ex.Message);
+                Console.WriteLine($"Error handling {sensorCode}: {ex.Message}");
+                return false; // Return false to indicate an error occurred
             }
+        }
+
+        private async Task<bool> SendCommandAndWaitForConfirmation(string command, string expectedResponse)
+        {
+            Console.WriteLine($"Sending command: {command}");
+            _serialPort.WriteLine(command);
+            await Task.Delay(50); // Small delay to allow buffer to fill
+            var response = _serialPort.ReadExisting();
+            return response.Contains(expectedResponse);
         }
 
         private async Task<string> SendCommandAndWaitForData(string command, string endMarker)
         {
-            Console.WriteLine($"Send Command and Wait for Data: {command}, end marker: {endMarker}");
+            Console.WriteLine($"Sending command for data: {command}");
             _serialPort.WriteLine(command);
-            return await ReadResponseUntilMarker(endMarker);
+            await Task.Delay(50); // Wait for data to start arriving
+
+            var timer = new System.Timers.Timer(3000); // Set a 3-second timeout
+            timer.Start();
+
+            StringBuilder response = new StringBuilder();
+            string temp;
+            while (!timer.Enabled || !response.ToString().Contains(endMarker))
+            {
+                if (_serialPort.BytesToRead > 0)
+                {
+                    temp = _serialPort.ReadExisting();
+                    response.Append(temp);
+                    if (temp.Contains(endMarker)) break;
+                }
+            }
+
+            timer.Stop();
+            if (!response.ToString().Contains(endMarker))
+            {
+                Console.WriteLine("Timeout or incomplete data received.");
+                return null; // Return null to indicate a timeout or incomplete data
+            }
+            return response.ToString();
         }
 
         private async Task<string> ReadResponseUntilMarker(string marker)
@@ -135,22 +182,26 @@ namespace SerialPortCommunication
             return lines.Skip(1).Select(line => ParseEvent(line, sensorCode)).ToList();
         }
 
+
         private Event ParseEvent(string data, string sensorCode)
         {
-            var regex = new Regex(@"(?<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (?<beaconId>[^,]+?),\s*(?<status>\d{1,3}),\s*(?<actionCode>[FL]1)");
+             Console.WriteLine($"Process Data: {data}, sensor code: {sensorCode}");
+            var regex = new Regex(@"(?<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (?<beaconId>[^,]+?),((?<status>\d+),)?(?<actionCode>[FL]1)");
             var match = regex.Match(data);
 
             if (match.Success)
             {
                 string timestamp = match.Groups["timestamp"].Value;
                 string beaconId = match.Groups["beaconId"].Value;
-                int status = int.Parse(match.Groups["status"].Value);
                 string actionCode = match.Groups["actionCode"].Value;
 
-                if (status > sensorThresholds[sensorCode])
+                // Check if the status group was captured, otherwise default to 0
+                int status = match.Groups["status"].Success ? int.Parse(match.Groups["status"].Value) : 0;
+
+                // Check if the action code ends with F1 or L1
+                if (actionCode == "L1" && match.Groups["status"].Success == false)
                 {
-                    LogError(sensorCode, $"RSSI {status} exceeds threshold for {sensorCode} in data: '{data}'.");
-                    return null;
+                    status = 0; // Ensure status is 0 if actionCode is L1 and no status provided
                 }
 
                 return new Event
@@ -159,19 +210,20 @@ namespace SerialPortCommunication
                     SensorId = sensorCode,
                     EmployeeId = "-",
                     Timestamp = DateTime.Parse(timestamp),
-                    ProjectId = "4f24ac1f-6fd3-4a11-9613-c6a564f2bd86",
-                    Action = actionCode == "F1" ? 3 : (actionCode == "L1" ? 7 : 7),  // Assuming no other values appear
+                    ProjectId = "projectid",
+                    Action = actionCode == "F1" ? 3 : 7,
                     BeaconId = beaconId,
                     Status = status.ToString()
                 };
             }
             else
             {
-                Console.WriteLine($"Invalid Even Format: {data}, sensor: {sensorCode}");
+                Console.WriteLine($"Invalid event format: {data}, sensor: {sensorCode}");
                 LogError(sensorCode, $"Invalid event format: {data}");
                 return null;
             }
         }
+
 
         private void LogError(string sensorCode, string message)
         {
@@ -183,12 +235,14 @@ namespace SerialPortCommunication
         private void OnDataReceived(object sender, SerialDataReceivedEventArgs e)
         {
             string data = _serialPort.ReadExisting();
+            Console.WriteLine($"On Data Received: {data}");
             var lines = data.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
             foreach (var line in lines)
             {
                 try
                 {
-                    var evt = ParseEvent(line, _serialPort.PortName);
+                    Console.WriteLine($"On Data Received LINE: {line}");
+                    var evt = ParseEvent(line, currentSensor);
                     if (evt != null)
                     {
                         _rabbitMQService.SendMessage(evt);
@@ -196,7 +250,7 @@ namespace SerialPortCommunication
                 }
                 catch (Exception ex)
                 {
-                    LogError(_serialPort.PortName, $"Failed to parse event from line '{line}': {ex.Message}");
+                    LogError(currentSensor, $"Failed to parse event from line '{line}': {ex.Message}");
                 }
             }
         }
@@ -223,6 +277,7 @@ namespace SerialPortCommunication
         public void SendMessage(Event evt)
         {
             if (evt == null) return;  // Do not attempt to send null events
+            Console.WriteLine($"RabbitMQ Service: {evt}");
             var message = JsonConvert.SerializeObject(evt);
             var body = Encoding.UTF8.GetBytes(message);
             _channel.BasicPublish(exchange: "", routingKey: "events", basicProperties: null, body: body);
