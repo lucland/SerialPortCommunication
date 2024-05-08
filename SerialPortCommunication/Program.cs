@@ -120,9 +120,16 @@ namespace SerialPortCommunication
             Console.WriteLine($"Expected response: {expectedResponse}");
             Console.WriteLine($"Received data: {receivedData}");
 
-            bool isReceived = await Task.Run(() => responseReceived.Wait(3000)); // Wait up to 3 seconds for the response
+            bool isReceived = await Task.Run(() =>
+            {
+                if (responseReceived.Wait(3000)) // Wait up to 3 seconds for the response
+                {
+                    return receivedData == expectedResponse || receivedData.Contains(expectedResponse);
+                }
+                return false;
+            });
 
-            if (isReceived && receivedData == expectedResponse)
+            if (isReceived)
             {
                 Console.WriteLine($"Received correct response for {command}");
                 return true;
