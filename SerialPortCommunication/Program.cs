@@ -11,6 +11,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using SerialPortCommunication.Models;
 using static System.Runtime.InteropServices.JavaScript.JSType;
+using SerialPortCommunication.Repositories;
 
 namespace SerialPortCommunication
 {
