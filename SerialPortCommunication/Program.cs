@@ -53,12 +53,10 @@ namespace SerialPortCommunication
             _rabbitMQService = new RabbitMQService();
             _httpClient = new HttpClient();
             sensorThresholds = new Dictionary<string, int> {
-                { "P1B", 100 }, { "P2", 75 }, { "P3", 80 },
-                { "P4", 65 }, { "P5", 70 }, { "P6", 100 },
-                { "P7", 100 }, { "P8", 65 }, { "P9", 75 },
-                { "P1", 100 }
+                { "P10", 100 },
+                { "P1B", 100 }, { "P5", 70 }, { "P2", 75 }, { "P6", 100 }, { "P3", 80 },
+                { "P7", 100 }, { "P4", 65 }, { "P8", 65 }, { "P1", 100 }, { "P9", 75 }
             };
-            currentSensor = "P1";
             _sensors = sensorThresholds.Keys.ToList();
         }
 
@@ -79,105 +77,60 @@ namespace SerialPortCommunication
             {
                 foreach (var sensor in _sensors)
                 {
-                    currentSensor = sensor;
-                    if (!await HandleSensorCycle(sensor))
-                    {
-                        Console.WriteLine($"Failed to handle {sensor}, skipping to next.");
-                    }
+                    await HandleSensorCycle(sensor);
                 }
             }
         }
 
-        private async Task<bool> HandleSensorCycle(string sensorCode)
+        private async Task HandleSensorCycle(string sensorCode)
         {
-            if (await SendCommandAndWaitForConfirmation($"{sensorCode} OK", $"{sensorCode} Yes"))
-            {
-                receivedData = "";
-                string data = await SendCommandAndWaitForData($"{sensorCode} SDATAFULL", "}");
-                if (!string.IsNullOrWhiteSpace(data) && !data.EndsWith("}"))
-                {
-                    ProcessData(data, sensorCode);
-                }
-                await Task.Delay(50); // Small delay before sending clean up commands
-                await SendCommandAndWaitForData($"{sensorCode} CLDATA", $"{sensorCode} CLDATA OK");
-                await SendCommandAndWaitForData($"{sensorCode} CLDATA2", $"{sensorCode} CLDATA2 OK");
-                return true;
-            }
-            else
-            {
-                Console.WriteLine($"No response or incorrect response from {sensorCode}, skipping to next sensor.");
-                return false;
-            }
-        }
-
-
-        private async Task<bool> SendCommandAndWaitForConfirmation(string command, string expectedResponse)
-        {
-            Console.WriteLine($"Sending command: {command}");
-            _serialPort.DiscardInBuffer(); // Clear the buffer to ensure no old data is processed
-            responseReceived.Reset();
+            Console.WriteLine($"Handling sensor: {sensorCode}");
+            string command = $"{sensorCode} SDATAFULL";
             _serialPort.WriteLine(command);
-            Console.WriteLine($"Waiting for response for {command}");
-            Console.WriteLine($"Expected response: {expectedResponse}");
-            Console.WriteLine($"Received data: {receivedData}");
-            bool isReceived = responseReceived.Wait(3000); // Wait up to 3 seconds for the response
-            if (isReceived && receivedData.ToString().Contains(expectedResponse))
+            await Task.Delay(1000); // Short delay to ensure command is sent before reading
+
+            StringBuilder data = new StringBuilder();
+            var timeoutTask = Task.Delay(3000); // Set a 5-second timeout for response
+
+            while (true)
             {
-                Console.WriteLine($"Received correct response for {command}");
-                receivedData = string.Empty;
-                return true;
-            }
-            else
-            {
-                Console.WriteLine($"No correct response received for {command}, data received:'{receivedData}'");
-                receivedData = string.Empty;
-                return false;
-            }
-        }
-
-        private async Task<string> SendCommandAndWaitForData(string command, string endMarker)
-        {
-            Console.WriteLine($"Sending command for data: {command}");
-            lastResponse = "";
-            responseReceived.Reset();
-            _serialPort.WriteLine(command);
-
-            // Wait for the signal to be set in the OnDataReceived handler or timeout after 3000 ms
-            responseReceived.Wait(3000);
-            return lastResponse.Contains(endMarker) ? lastResponse : null;
-        }
-
-        private async Task<string> ReadResponseUntilMarker(string marker, int timeout)
-        {
-            StringBuilder response = new StringBuilder();
-            var completionSource = new TaskCompletionSource<string>();
-
-            void handler(object sender, SerialDataReceivedEventArgs args)
-            {
-                var data = _serialPort.ReadExisting();
-                response.Append(data);
-                if (data.Contains(marker))
+                if (_serialPort.BytesToRead > 0)
                 {
-                    _serialPort.DataReceived -= handler;
-                    completionSource.SetResult(response.ToString());
+                   
+                        data.Append(_serialPort.ReadExisting());
+                        Console.WriteLine($"DATA:{data}");
+                
+                    
                 }
+                if (data.ToString().Trim().Contains("}")) break;
+                if (await Task.WhenAny(timeoutTask) == timeoutTask)
+                {
+                    Console.WriteLine($"TIMEOUT data: {timeoutTask} from sensor: {sensorCode}");
+                    break;
+                } // Timeout
             }
 
-            _serialPort.DataReceived += handler;
-            var timer = new System.Timers.Timer(timeout) { AutoReset = false };
-            timer.Elapsed += (sender, args) => {
-                _serialPort.DataReceived -= handler;
-                completionSource.TrySetResult(response.ToString()); // Ensure to return whatever was received even if incomplete
-                timer.Stop();
-            };
-            timer.Start();
+            if (!string.IsNullOrWhiteSpace(data.ToString().Trim()) && !data.ToString().Trim().Contains(" OK"))
+            {
+                Console.WriteLine($"Handling data: {data.ToString().Trim()} from sensor: {sensorCode}");
+                ProcessData(data.ToString().Trim(), sensorCode);
+                await Task.Delay(3000);
+                _serialPort.WriteLine($"{sensorCode} CLDATA");
+                Console.WriteLine($"{sensorCode} CLDATA");
+                _serialPort.WriteLine($"{sensorCode} CLDATA2");
+                Console.WriteLine($"{sensorCode} CLDATA2");
+            }
 
-            return await completionSource.Task;
+            
+            await Task.Delay(3000);
         }
+
+
+     
 
         private void ProcessData(string data, string sensorCode)
         {
-            Console.WriteLine($"Processing data: {data}, sensor code: {sensorCode}");
+            Console.WriteLine($"Processing data for {sensorCode}");
             var events = ParseEvents(data, sensorCode);
             foreach (var evt in events)
             {
@@ -188,7 +141,7 @@ namespace SerialPortCommunication
         private List<Event> ParseEvents(string data, string sensorCode)
         {
             var lines = data.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            return lines.Skip(1).Select(line => ParseEvent(line, sensorCode)).ToList();
+            return lines.Skip(1).TakeWhile(line => !line.Contains("}")).Select(line => ParseEvent(line, sensorCode)).Where(evt => evt != null).ToList();
         }
 
 
@@ -219,7 +172,7 @@ namespace SerialPortCommunication
                     SensorId = sensorCode,
                     EmployeeId = "-",
                     Timestamp = DateTime.Parse(timestamp),
-                    ProjectId = "projectid",
+                    ProjectId = "4f24ac1f-6fd3-4a11-9613-c6a564f2bd86",
                     Action = actionCode == "F1" ? 3 : 7,
                     BeaconId = beaconId,
                     Status = status.ToString()
@@ -243,33 +196,6 @@ namespace SerialPortCommunication
 
         private void OnDataReceived(object sender, SerialDataReceivedEventArgs e)
         {
-            string data = _serialPort.ReadExisting();
-            Console.WriteLine($"Received raw data: {data}");
-            //if data contains Yes, we set receivedData = data, else, +=
-            if ( data != null )
-            {
-                if (data.Contains("Yes"))
-                {
-                    receivedData = data;
-                    Console.WriteLine($"receivedData CONTAINS Yes raw data: {receivedData}");
-                    receivedData = receivedData.Replace("\n", "").Replace("\r", "");
-                    receivedData = receivedData.Trim();
-                    Console.WriteLine($"receivedData TRIM: {receivedData}");
-                } else
-                {
-                    receivedData += data;
-                }
-            }
-            
-            if (receivedData.Contains(currentSensor + " Yes"))
-            {
-                Console.WriteLine($"Contains raw data: {receivedData}");
-                responseReceived.Set(); // Only set the event if the expected response is fully received
-            }
-            else
-            {
-                Console.WriteLine($"receivedData raw data DO NOT CONTAIN: {currentSensor} Yes");
-            }
         }
 
         private void OnErrorReceived(object sender, SerialErrorReceivedEventArgs e)
