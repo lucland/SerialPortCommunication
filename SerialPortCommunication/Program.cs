@@ -114,7 +114,7 @@ namespace SerialPortCommunication
         {
             Console.WriteLine($"Sending command: {command}");
             _serialPort.WriteLine(command);
-            await Task.Delay(50); // Small delay to allow buffer to fill
+            await Task.Delay(500); // Small delay to allow buffer to fill
             var response = _serialPort.ReadExisting();
             return response.Contains(expectedResponse);
         }
@@ -168,13 +168,13 @@ namespace SerialPortCommunication
             return await taskCompletionSource.Task;
         }
 
-        private void ProcessData(string data, string sensorCode)
+        private async void ProcessData(string data, string sensorCode)
         {
             Console.WriteLine($"Process Data: {data}, sensor code: {sensorCode}");
             var events = ParseEvents(data, sensorCode);
             foreach (var evt in events)
             {
-                _rabbitMQService.SendMessage(evt);
+                await _rabbitMQService.SendMessageAsync(evt);
             }
         }
 
@@ -247,7 +247,7 @@ namespace SerialPortCommunication
                     var evt = ParseEvent(line, currentSensor);
                     if (evt != null)
                     {
-                        _rabbitMQService.SendMessage(evt);
+                        _rabbitMQService.SendMessageAsync(evt);
                     }
                 }
                 catch (Exception ex)
