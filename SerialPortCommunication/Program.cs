@@ -242,6 +242,8 @@ namespace SerialPortCommunication
             Console.WriteLine($"Received raw data: {data}");
             receivedData += data;
             receivedData.Trim();
+            //remove any line breaks from received data
+            receivedData = receivedData.Replace("\n", "").Replace("\r", "");
             if (receivedData.Contains(currentSensor + " Yes"))
             {
                 responseReceived.Set(); // Only set the event if the expected response is fully received
