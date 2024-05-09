@@ -53,9 +53,8 @@ namespace SerialPortCommunication
             _rabbitMQService = new RabbitMQService();
             _httpClient = new HttpClient();
             sensorThresholds = new Dictionary<string, int> {
-                { "P10", 100 },
-                { "P1B", 100 }, { "P5", 70 }, { "P2", 75 }, { "P6", 100 }, { "P3", 80 },
-                { "P7", 100 }, { "P4", 65 }, { "P8", 65 }, { "P1", 100 }, { "P9", 75 }
+                { "P1B", 75 }, { "P5", 75 }, { "P2", 75 }, 
+                { "P7", 75 }, { "P4", 75 }, { "P3", 80 }, { "P8", 75 }, { "P9", 75 }
             };
             _sensors = sensorThresholds.Keys.ToList();
         }
@@ -100,7 +99,7 @@ namespace SerialPortCommunication
                     lastDataReceivedTime = DateTime.Now; // Reset timer on data received
                 }
 
-                if (DateTime.Now - lastDataReceivedTime > TimeSpan.FromSeconds(5))
+                if (DateTime.Now - lastDataReceivedTime > TimeSpan.FromSeconds(3))
                 {
                     Console.WriteLine($"Timeout or end of data block from {sensorCode}");
                     break; // Break the loop if no data for 3 seconds
