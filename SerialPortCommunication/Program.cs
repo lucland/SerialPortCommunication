@@ -38,8 +38,9 @@ namespace SerialPortCommunication
         private string receivedData = "";
         private readonly ManualResetEventSlim responseReceived = new ManualResetEventSlim(false);
         private string lastResponse = string.Empty;
+        private readonly EventRepository _eventRepository;
 
-        public SerialManager()
+            public SerialManager()
         {
             _serialPort = new SerialPort("COM3", 115200, Parity.None, 8, StopBits.One)
             {
@@ -54,9 +55,156 @@ namespace SerialPortCommunication
             _httpClient = new HttpClient();
             sensorThresholds = new Dictionary<string, int> {
                 { "P1B", 75 }, { "P5", 75 }, { "P2", 75 }, 
-                { "P7", 75 }, { "P4", 75 }, { "P3", 80 }, { "P8", 75 }, { "P9", 75 }
+                { "P7", 75 }, { "P4", 75 }, { "P3", 80 }, { "P8", 75 },{ "P1", 75 }, { "P9", 75 }
             };
             _sensors = sensorThresholds.Keys.ToList();
+            _eventRepository = new EventRepository(apiService: new ApiService());
+        }
+
+        public async Task PreCycleAsync()
+        {
+            Console.WriteLine("Running pre-cycle operations...");
+            var stringsToSend = await _eventRepository.GetAllAreas(); // Fetch strings as currently implemented
+
+            foreach (var sensor in _sensors)
+            {
+                Console.WriteLine($"Starting pre-cycle for {sensor}");
+                foreach (var originalString in stringsToSend)
+                {
+                    bool stringConfirmed;
+                    do
+                    {
+                        stringConfirmed = true; // Assume the string will be confirmed
+                        var modifiedString = originalString.Replace("P0 A", $"{sensor} A");
+                        _serialPort.WriteLine(modifiedString);
+                        Console.WriteLine($"Sent to {sensor}: {modifiedString}");
+
+                        if (!await WaitForSensorConfirmation($"{sensor} A OK"))
+                        {
+                            Console.WriteLine($"No confirmation from {sensor}, resending.");
+                            stringConfirmed = false; // Mark for resend
+                        }
+                        else
+                        {
+                            // Send command to list saved data and validate
+                            _serialPort.WriteLine($"{sensor} SL");
+                            var receivedData = await ReadDataFromSensor(sensor);
+                            if (!ValidateSensorData(receivedData, modifiedString))
+                            {
+                                Console.WriteLine($"Data validation for {sensor} failed, resending.");
+                                stringConfirmed = false; // Data validation failed, mark for resend
+                            }
+                        }
+                    } while (!stringConfirmed); // Keep sending the same string until confirmed and validated
+                }
+            }
+        }
+
+        public async Task CleanSensorDataAsync()
+        {
+            foreach (var sensor in _sensors)
+            {
+                Console.WriteLine($"Cleaning data for sensor: {sensor}");
+                bool hasInvalidData;
+                do
+                {
+                    hasInvalidData = false;
+                    _serialPort.WriteLine($"{sensor} SL");
+                    string dataList = await ReadDataFromSensor(sensor);
+                    var lines = dataList.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+
+                    foreach (var line in lines)
+                    {
+                        if (!IsValidDataFormat(line))
+                        {
+                            hasInvalidData = true;
+                            string cleanCommand = $"{sensor} CL,{ExtractInvalidData(line)}";
+                            _serialPort.WriteLine(cleanCommand);
+                            if (!await WaitForSensorConfirmation($"{sensor} CL OK"))
+                            {
+                                Console.WriteLine($"Failed to clean data for {sensor}, retrying...");
+                                break;
+                            }
+                        }
+                    }
+                } while (hasInvalidData); // Repeat if there was invalid data to ensure all data is cleaned
+            }
+        }
+
+        private bool IsValidDataFormat(string line)
+        {
+            // Regex to check if line matches the pattern "xx:xx:xx:xx:xx:xx"
+            return Regex.IsMatch(line.Trim(), @"^[\da-f]{2}(:[\da-f]{2}){5}$", RegexOptions.IgnoreCase);
+        }
+
+        private string ExtractInvalidData(string line)
+        {
+            // Extract the part of the line that needs cleaning, assuming it starts with "Pn A," and ends with bad data
+            var parts = line.Split(',');
+            return parts.Last(); // Assuming the last part is the one to be cleaned
+        }
+
+        private async Task<bool> WaitForSensorConfirmation(string expectedResponse)
+        {
+            Console.WriteLine("WaitForSensorConfirmation");
+            Console.WriteLine($"{expectedResponse}");
+            StringBuilder response = new StringBuilder();
+            var startTime = DateTime.Now;
+
+            while ((DateTime.Now - startTime) < TimeSpan.FromSeconds(10)) // Timeout of 10 seconds
+            {
+                if (_serialPort.BytesToRead > 0)
+                {
+                    response.Append(_serialPort.ReadExisting());
+                    Console.WriteLine($"Response: {response}, expected response: {expectedResponse}");
+                    if (response.ToString().Contains(expectedResponse))
+                    {
+                        return true;
+                    }
+                }
+                await Task.Delay(100);
+            }
+            return false;
+        }
+
+        private async Task<string> ReadDataFromSensor(string sensorCode)
+        {
+            Console.WriteLine("ReadDataFromSensor");
+            Console.WriteLine($"{sensorCode}");
+            StringBuilder data = new StringBuilder();
+            var lastDataReceivedTime = DateTime.Now;
+
+            while (true)
+            {
+                if (_serialPort.BytesToRead > 0)
+                {
+                    string received = _serialPort.ReadExisting();
+                    data.Append(received);
+                    lastDataReceivedTime = DateTime.Now; // Reset timer on data received
+                }
+
+                if (DateTime.Now - lastDataReceivedTime > TimeSpan.FromSeconds(3))
+                {
+                    Console.WriteLine("Exit loop if no data for 3 seconds");
+                    break; // Exit loop if no data for 3 seconds
+                }
+
+                await Task.Delay(200); // Reduce CPU usage
+            }
+            Console.WriteLine(data.ToString());
+            return data.ToString();
+        }
+
+        private bool ValidateSensorData(string sensorData, string originalString)
+        {
+            Console.WriteLine("ValidateSensorData");
+            Console.WriteLine($"{sensorData}");
+            Console.WriteLine($"{originalString}");
+            var expectedWords = originalString.Split(',').Skip(1); // Skip the "Pn A" part
+            var receivedWords = sensorData.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                                          .Where(line => !line.Contains("{") && !line.Contains("}"));
+
+            return expectedWords.All(word => receivedWords.Any(received => received.Contains(word)));
         }
 
         public async Task InitializeAsync()
@@ -68,6 +216,8 @@ namespace SerialPortCommunication
             }
 
             await StartCycleAsync();
+            //await PreCycleAsync();
+            //await CleanSensorDataAsync();
         }
 
         private async Task StartCycleAsync()
