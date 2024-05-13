@@ -54,8 +54,8 @@ namespace SerialPortCommunication
             _rabbitMQService = new RabbitMQService();
             _httpClient = new HttpClient();
             sensorThresholds = new Dictionary<string, int> {
-                { "P1B", 75 }, { "P5", 75 }, { "P2", 75 }, 
-                { "P7", 75 }, { "P4", 75 }, { "P3", 80 }, { "P8", 75 },{ "P1", 75 }, { "P9", 75 }
+                { "P1B", 73 }, { "P5", 70 }, { "P2", 73 }, 
+                { "P7", 70 }, { "P4", 70 }, { "P3", 73 }, { "P8", 70 },{ "P1", 73 }, { "P9", 70 }
             };
             _sensors = sensorThresholds.Keys.ToList();
             _eventRepository = new EventRepository(apiService: new ApiService());
@@ -233,50 +233,55 @@ namespace SerialPortCommunication
 
         private async Task HandleSensorCycle(string sensorCode)
         {
-            Console.WriteLine($"Handling sensor: {sensorCode}");
-            string command = $"{sensorCode} SDATAFULL";
-            _serialPort.WriteLine(command);
-            StringBuilder data = new StringBuilder();
-            var lastDataReceivedTime = DateTime.Now;
-
-            while (true)
+            try
             {
-                if (_serialPort.BytesToRead > 0)
+                Console.WriteLine($"Handling sensor: {sensorCode}");
+                string command = $"{sensorCode} SDATAFULL";
+                _serialPort.WriteLine(command);
+                StringBuilder data = new StringBuilder();
+                var lastDataReceivedTime = DateTime.Now;
+
+                while (true)
                 {
-                    string received = _serialPort.ReadExisting();
-                    data.Append(received);
-                    Console.WriteLine($"DATA from {sensorCode}: {received}");
-                    lastDataReceivedTime = DateTime.Now; // Reset timer on data received
+                    if (_serialPort.BytesToRead > 0)
+                    {
+                        string received = _serialPort.ReadExisting();
+                        data.Append(received);
+                        Console.WriteLine($"DATA from {sensorCode}: {received}");
+                        lastDataReceivedTime = DateTime.Now; // Reset timer on data received
+                    }
+
+                    if (DateTime.Now - lastDataReceivedTime > TimeSpan.FromSeconds(3))
+                    {
+                        Console.WriteLine($"Timeout or end of data block from {sensorCode}");
+                        break; // Break the loop if no data for 3 seconds
+                    }
+
+                    await Task.Delay(100); // Reduce CPU usage
                 }
 
-                if (DateTime.Now - lastDataReceivedTime > TimeSpan.FromSeconds(3))
+                // Process data if it's a valid block (ignoring empty or just opened commands)
+                if (!string.IsNullOrWhiteSpace(data.ToString()) && data.ToString().Contains("}"))
                 {
-                    Console.WriteLine($"Timeout or end of data block from {sensorCode}");
-                    break; // Break the loop if no data for 3 seconds
+                    Console.WriteLine($"Processing data from {sensorCode}");
+                    ProcessData(data.ToString(), sensorCode);
+                }
+                else
+                {
+                    Console.WriteLine($"No valid data received from {sensorCode} or incomplete data block.");
                 }
 
-                await Task.Delay(100); // Reduce CPU usage
+                // Cleaning commands
+                _serialPort.WriteLine($"{sensorCode} CLDATA");
+                _serialPort.WriteLine($"{sensorCode} CLDATA2");
             }
-
-            // Process data if it's a valid block (ignoring empty or just opened commands)
-            if (!string.IsNullOrWhiteSpace(data.ToString()) && data.ToString().Contains("}"))
+            catch (Exception ex)
             {
-                Console.WriteLine($"Processing data from {sensorCode}");
-                ProcessData(data.ToString(), sensorCode);
+                Console.WriteLine($"An exception occurred while handling sensor data: {ex.Message}");
+                LogError(sensorCode, $"Exception: {ex.Message}");
+                // Optionally, consider if some recovery or cleanup is necessary here
             }
-            else
-            {
-                Console.WriteLine($"No valid data received from {sensorCode} or incomplete data block.");
-            }
-
-            // Cleaning commands
-            _serialPort.WriteLine($"{sensorCode} CLDATA");
-            _serialPort.WriteLine($"{sensorCode} CLDATA2");
         }
-
-
-
-
 
         private void ProcessData(string data, string sensorCode)
         {
