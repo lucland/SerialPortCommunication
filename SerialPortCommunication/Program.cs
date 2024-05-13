@@ -315,6 +315,13 @@ namespace SerialPortCommunication
                 {
                     status = 0; // Ensure status is 0 if actionCode is L1 and no status provided
                 }
+                //if sensorCode threshold is exceeded, log error and return null
+                if (sensorThresholds[sensorCode] < status)
+                {
+                    Console.WriteLine($"Threshold exceeded for {sensorCode}, status: {status}");
+                    LogError(sensorCode, $"Threshold exceeded for {sensorCode}, status: {status}");
+                    return null;
+                }
 
                 return new Event
                 {
