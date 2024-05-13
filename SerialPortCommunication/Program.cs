@@ -54,8 +54,8 @@ namespace SerialPortCommunication
             _rabbitMQService = new RabbitMQService();
             _httpClient = new HttpClient();
             sensorThresholds = new Dictionary<string, int> {
-                { "P1B", 73 }, { "P5", 70 }, { "P2", 73 }, 
-                { "P7", 70 }, { "P4", 70 }, { "P3", 73 }, { "P8", 70 },{ "P1", 73 }, { "P9", 70 }
+                { "P1B", 73 }, { "P5", 72 }, { "P2", 73 }, 
+                { "P7", 72 }, { "P4", 72 }, { "P3", 73 }, { "P8", 72 },{ "P1", 73 }, { "P9", 72 }
             };
             _sensors = sensorThresholds.Keys.ToList();
             _eventRepository = new EventRepository(apiService: new ApiService());
